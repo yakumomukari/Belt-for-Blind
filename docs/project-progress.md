@@ -18,7 +18,7 @@
 
 ## 当前仓库状态
 
-仓库目前已经搭建了最小 Android/Kotlin 项目框架。当前只放置工程结构、数据模型、接口和占位类，没有实现真实 GPS 监听、权限弹窗、过滤规则、JSON 序列化或文件读写。
+仓库目前已经搭建了最小 Android/Kotlin 项目框架，并已合入一版基于 Jetpack Compose 的 UI Mock 页面。当前 UI 可以用于手动测试“开始记录、停止记录、输入路线名、保存路线、查看已保存路线”的前端流程，但底层仍然使用 Mock 数据，没有实现真实 GPS 监听、真实权限弹窗、过滤规则、JSON 序列化或文件读写。
 
 已创建结构：
 
@@ -45,6 +45,11 @@ app/
         storage/
           RouteStore.kt
           JsonRouteStore.kt
+      ui/record/
+        RecordingUiState.kt
+        MockRouteRecorder.kt
+        RecordViewModel.kt
+        RecordScreen.kt
     res/values/
       strings.xml
       styles.xml
@@ -90,6 +95,20 @@ points
 - `route.recorder`：面向 UI 的记录接口和协调管理类。
 - `route.location`：定位权限和定位数据源边界。
 - `route.storage`：路线持久化边界。
+- `ui.record`：Compose 测试页面、页面状态、ViewModel、Mock 记录器。
+
+## 当前可以测试
+
+当前可以通过 UI Mock 测试以下流程：
+
+- 进入 App 后看到记录页面。
+- 点击“开始记录”后进入“记录中”状态。
+- 记录中点数会按 Mock 逻辑递增。
+- 点击“停止记录”后进入等待保存状态。
+- 输入路线名称后可以点击“保存路线”。
+- 保存成功后可以点击“查看已保存路线”，看到 Mock 路线列表。
+
+这些测试不依赖真实 GPS，不会生成本地 JSON 文件。
 
 ## 尚未实现
 
