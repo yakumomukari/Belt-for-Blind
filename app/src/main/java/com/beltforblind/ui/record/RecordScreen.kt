@@ -28,6 +28,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,9 +40,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.amap.api.maps2d.CameraUpdateFactory
+import com.amap.api.maps2d.MapView
+import com.amap.api.maps2d.model.LatLng
+import com.amap.api.maps2d.model.LatLngBounds
+import com.amap.api.maps2d.model.MarkerOptions
+import com.amap.api.maps2d.model.PolylineOptions
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import java.text.SimpleDateFormat
@@ -49,7 +58,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun RecordScreen() {
+fun RecordScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val viewModel: RecordViewModel = viewModel(
         factory = RecordViewModel.factory(context.applicationContext),
@@ -103,6 +112,7 @@ fun RecordScreen() {
     }
 
     Scaffold(
+        modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         val selected = selectedRoute
@@ -143,6 +153,7 @@ fun RecordScreen() {
             DataRow(
                 label = "精度状态",
                 value = latestPointAccepted.formatAccuracyStatus(),
+                boldValue = true,
             )
 
             if (recentPoints.isNotEmpty()) {
@@ -267,13 +278,21 @@ private fun PermissionRequestCard(onRequestPermission: () -> Unit) {
 }
 
 @Composable
-private fun DataRow(label: String, value: String) {
+private fun DataRow(
+    label: String,
+    value: String,
+    boldValue: Boolean = false,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(text = label, style = MaterialTheme.typography.bodyLarge)
-        Text(text = value, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = if (boldValue) FontWeight.Bold else FontWeight.Normal,
+        )
     }
 }
 
@@ -337,6 +356,7 @@ private fun RouteDetailScreen(
         DataRow(label = "创建时间", value = route.createdAt.formatTimestamp())
         DataRow(label = "定位点数量", value = route.points.size.toString())
 
+        MapRoutePreview(points = route.points)
         RoutePreview(points = route.points)
 
         Text("定位点详情", style = MaterialTheme.typography.titleMedium)
@@ -352,6 +372,46 @@ private fun RouteDetailScreen(
             if (route.points.size > MAX_DETAIL_POINTS) {
                 Text("仅显示前 $MAX_DETAIL_POINTS 个点，共 ${route.points.size} 个点")
             }
+        }
+    }
+}
+
+@Composable
+private fun MapRoutePreview(points: List<RoutePoint>) {
+    val context = LocalContext.current
+    val mapView = remember {
+        MapView(context).apply {
+            onCreate(null)
+        }
+    }
+
+    DisposableEffect(mapView) {
+        mapView.onResume()
+        onDispose {
+            mapView.onPause()
+            mapView.onDestroy()
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("地图预览", style = MaterialTheme.typography.titleMedium)
+            AndroidView(
+                factory = { mapView },
+                update = { view ->
+                    view.renderRoute(points)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(520.dp),
+            )
+            Text(
+                text = "高德 2D 地图预览：蓝色为起点，红色为终点，绿色为路径点。",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -423,7 +483,10 @@ private fun PointCard(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+            )
             Text("纬度：%.6f".format(point.latitude))
             Text("经度：%.6f".format(point.longitude))
             Text("时间：${point.timestamp.formatTimestamp()}")
@@ -444,4 +507,82 @@ private fun Boolean?.formatAccuracyStatus(): String {
     }
 }
 
+private fun MapView.renderRoute(points: List<RoutePoint>) {
+    val aMap = map
+    aMap.clear()
+
+    val latLngs = points.map { LatLng(it.latitude, it.longitude) }
+    if (latLngs.isEmpty()) {
+        aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(31.2304, 121.4737), 15f))
+        return
+    }
+
+    if (latLngs.size > 1) {
+        aMap.addPolyline(
+            PolylineOptions()
+                .addAll(latLngs)
+                .width(14f)
+                .color(POLYLINE_COLOR),
+        )
+    }
+
+    latLngs.forEachIndexed { index, latLng ->
+        val isStart = index == 0
+        val isEnd = index == latLngs.lastIndex
+        val color = when {
+            isStart -> START_HUE
+            isEnd -> END_HUE
+            else -> ROUTE_HUE
+        }
+
+        if (isStart || isEnd || latLngs.size <= MAX_VISIBLE_MARKERS) {
+            aMap.addMarker(
+                MarkerOptions()
+                    .position(latLng)
+                    .title("点 ${index + 1}")
+                    .snippet(
+                        "lat=%.6f, lng=%.6f".format(
+                            Locale.US,
+                            latLng.latitude,
+                            latLng.longitude,
+                        ),
+                    )
+                    .anchor(0.5f, 0.5f),
+            )?.apply {
+                setIcon(com.amap.api.maps2d.model.BitmapDescriptorFactory.defaultMarker(color))
+            }
+        }
+    }
+
+    if (latLngs.size == 1) {
+        aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLngs.first(), 20f))
+        return
+    }
+
+    val bounds = LatLngBounds.Builder().also { builder ->
+        latLngs.forEach(builder::include)
+    }.build()
+    aMap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 24))
+
+    val latSpan = points.maxOf { it.latitude } - points.minOf { it.latitude }
+    val lngSpan = points.maxOf { it.longitude } - points.minOf { it.longitude }
+    val targetZoom = if (latSpan < TINY_ROUTE_DEGREES && lngSpan < TINY_ROUTE_DEGREES) {
+        20f
+    } else if (latSpan < SMALL_ROUTE_DEGREES && lngSpan < SMALL_ROUTE_DEGREES) {
+        19f
+    } else {
+        18f
+    }
+    if (aMap.cameraPosition.zoom < targetZoom) {
+        aMap.moveCamera(CameraUpdateFactory.zoomTo(targetZoom))
+    }
+}
+
+private const val START_HUE = 210f
+private const val END_HUE = 0f
+private const val ROUTE_HUE = 120f
+private val POLYLINE_COLOR = android.graphics.Color.rgb(46, 125, 50)
+private const val TINY_ROUTE_DEGREES = 0.001
+private const val SMALL_ROUTE_DEGREES = 0.003
+private const val MAX_VISIBLE_MARKERS = 80
 private const val MAX_DETAIL_POINTS = 20

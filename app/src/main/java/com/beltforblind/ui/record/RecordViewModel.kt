@@ -5,7 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.CreationExtras
-import com.beltforblind.route.location.FusedLocationDataSource
+import com.beltforblind.route.location.AMapLocationDataSource
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.recorder.RouteRecordingManager
@@ -137,7 +137,7 @@ class RecordViewModel(
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
                     val recorder = RouteRecordingManager(
-                        locationDataSource = FusedLocationDataSource(context.applicationContext),
+                        locationDataSource = AMapLocationDataSource(context.applicationContext),
                         routeStore = JsonRouteStore(context.applicationContext),
                     )
                     return RecordViewModel(recorder) as T

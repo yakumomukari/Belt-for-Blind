@@ -2,11 +2,10 @@
 
 ## 项目概述
 
-本项目是一个面向盲人跑步辅助腰带的 Android/Kotlin App。当前阶段只关注路线记录的底层能力：定位点采集、路线数据维护、本地 JSON 保存，以及读取已保存路线。
+本项目是一个面向盲人跑步辅助腰带的 Android/Kotlin App。当前阶段主要关注路线记录的底层能力：定位点采集、路线数据维护、本地 JSON 保存、读取已保存路线，以及基础多页面框架。
 
 当前阶段不做以下功能：
 
-- 地图显示
 - 导航
 - 蓝牙连接
 - 震动电机控制
@@ -18,7 +17,7 @@
 
 ## 当前仓库状态
 
-仓库目前已经搭建了 Android/Kotlin 项目框架，并已合入一版基于 Jetpack Compose 的路线记录页面。当前已接入 `FusedLocationProviderClient`，可以在授权定位权限后开始/停止接收 GPS 定位点，并在页面显示点数、精度诊断、最近定位点和已保存路线。路线会保存为 App 私有目录下的 JSON 文件，重启 App 后仍可读取。
+仓库目前已经搭建了 Android/Kotlin 项目框架，并已合入一版基于 Jetpack Compose 的多页面入口。当前包含“记录”和“运动”两个页面：记录页保留路线记录、定位、保存、已保存路线详情和高德 2D 地图预览能力；运动页目前仅作为占位页面，后续再接入运动过程相关功能。路线会保存为 App 私有目录下的 JSON 文件，重启 App 后仍可读取。
 
 已创建结构：
 
@@ -41,7 +40,7 @@ app/
         location/
           LocationPermissionGateway.kt
           LocationDataSource.kt
-          FusedLocationDataSource.kt
+          AMapLocationDataSource.kt
         storage/
           RouteStore.kt
           JsonRouteStore.kt
@@ -50,6 +49,10 @@ app/
         MockRouteRecorder.kt
         RecordViewModel.kt
         RecordScreen.kt
+      ui/app/
+        BeltForBlindApp.kt
+      ui/sport/
+        SportScreen.kt
     res/values/
       strings.xml
       styles.xml
@@ -104,7 +107,8 @@ points
 - 进入 App 后看到记录页面。
 - 点击“开始记录”后触发定位权限申请。
 - 授权后进入“记录中”状态。
-- App 通过 `FusedLocationProviderClient` 接收定位点。
+- App 当前通过高德定位 SDK 接收定位点，定位模式为高精度并优先 GPS。
+- 定位请求间隔为 3 秒，避免定位点刷新过快。
 - 开始记录后先进行 15 秒 GPS 预热，预热阶段收到的点只用于诊断，不保存。
 - 定位点会经过精度过滤：`accuracy == null` 或 `accuracy > 8m` 的点会被丢弃。
 - 页面会显示已记录点数和最近一次有效精度。
@@ -115,9 +119,11 @@ points
 - 点击“停止记录”后进入等待保存状态。
 - 输入路线名称后可以点击“保存路线”。
 - 保存成功后可以点击“查看已保存路线”，看到本地 JSON 中的路线列表。
-- 点击已保存路线后进入详情页，可查看路径点预览图和前 20 个定位点详情。
+- 点击已保存路线后进入详情页，可查看高德 2D 地图预览、路径点 Canvas 预览图和前 20 个定位点详情。
+- 地图预览会在地图上显示所有路径点、起终点和路径连线，并尽量放大到路径点范围。
 
 这些测试依赖设备或模拟器可用定位。路线文件保存到 `filesDir/routes/`，App 重启后仍可读取。
+地图预览使用高德原生 2D `MapView`，依赖设备网络和已配置的高德 Key。
 
 ## 尚未实现
 
