@@ -1,6 +1,7 @@
 package com.beltforblind.route.recorder
 
 import com.beltforblind.route.location.LocationDataSource
+import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.storage.RouteStore
 
@@ -8,27 +9,124 @@ class RouteRecordingManager(
     private val locationDataSource: LocationDataSource,
     private val routeStore: RouteStore,
 ) : RouteRecorder {
+    private val rawPoints = mutableListOf<RoutePoint>()
+    private var isRecording = false
+    private var latestAccuracy: Float? = null
+    private var latestReceivedAccuracy: Float? = null
+    private var latestPointAccepted: Boolean? = null
+    private var discardedPointCount = 0
+    private var recordingStartedAt = 0L
+
     override fun startRecord() {
-        TODO("Start location listening in a later implementation step.")
+        if (isRecording) {
+            stopRecord()
+        }
+
+        rawPoints.clear()
+        latestAccuracy = null
+        latestReceivedAccuracy = null
+        latestPointAccepted = null
+        discardedPointCount = 0
+        recordingStartedAt = System.currentTimeMillis()
+        isRecording = true
+
+        try {
+            locationDataSource.start { point ->
+                if (!isRecording) {
+                    return@start
+                }
+
+                val accuracy = point.accuracy
+                latestReceivedAccuracy = accuracy
+                if (isInWarmup()) {
+                    latestPointAccepted = false
+                    discardedPointCount += 1
+                    return@start
+                }
+
+                if (accuracy == null || accuracy > MAX_ACCEPTED_ACCURACY_METERS) {
+                    latestPointAccepted = false
+                    discardedPointCount += 1
+                    return@start
+                }
+
+                rawPoints += point
+                latestAccuracy = accuracy
+                latestPointAccepted = true
+            }
+        } catch (error: SecurityException) {
+            isRecording = false
+            throw error
+        }
     }
 
     override fun stopRecord() {
-        TODO("Stop location listening in a later implementation step.")
+        if (!isRecording) {
+            return
+        }
+
+        isRecording = false
+        locationDataSource.stop()
     }
 
     override fun getPointCount(): Int {
-        TODO("Return current raw point count in a later implementation step.")
+        return rawPoints.size
     }
 
     override fun getLatestAccuracy(): Float? {
-        TODO("Return latest accepted accuracy in a later implementation step.")
+        return latestAccuracy
+    }
+
+    override fun getLatestReceivedAccuracy(): Float? {
+        return latestReceivedAccuracy
+    }
+
+    override fun isLatestPointAccepted(): Boolean? {
+        return latestPointAccepted
+    }
+
+    override fun getDiscardedPointCount(): Int {
+        return discardedPointCount
+    }
+
+    override fun getWarmupRemainingSeconds(): Long {
+        if (!isRecording || recordingStartedAt == 0L) {
+            return 0L
+        }
+
+        val elapsedMs = System.currentTimeMillis() - recordingStartedAt
+        val remainingMs = (WARMUP_DURATION_MS - elapsedMs).coerceAtLeast(0L)
+        return (remainingMs + 999L) / 1000L
+    }
+
+    override fun getCurrentPoints(): List<RoutePoint> {
+        return rawPoints.toList()
     }
 
     override fun saveRoute(name: String): RouteRecord {
-        TODO("Build and persist a route object in a later implementation step.")
+        require(name.isNotBlank()) { "Route name must not be blank." }
+
+        val createdAt = System.currentTimeMillis()
+        val route = RouteRecord(
+            id = "route_$createdAt",
+            name = name,
+            createdAt = createdAt,
+            points = rawPoints.toList(),
+        )
+        return routeStore.save(route)
     }
 
     override fun loadRoutes(): List<RouteRecord> {
-        TODO("Load saved routes from storage in a later implementation step.")
+        return routeStore.loadAll()
+    }
+
+    private companion object {
+        const val MAX_ACCEPTED_ACCURACY_METERS = 8f
+        const val WARMUP_DURATION_MS = 15_000L
+    }
+
+    private fun isInWarmup(): Boolean {
+        return recordingStartedAt > 0L &&
+            System.currentTimeMillis() - recordingStartedAt < WARMUP_DURATION_MS
     }
 }
