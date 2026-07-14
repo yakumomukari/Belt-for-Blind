@@ -12,6 +12,7 @@
 - 读取已保存路线
 - 记录页地图展示
 - 已保存路线列表和详情查看
+- Debug 构建下的内部虚拟 GPS 测试
 
 当前已完成路线切线的纯算法计算和保存详情页可视化；后续再继续做路线匹配、腰带方向识别、蓝牙通信和震动电机控制。
 
@@ -89,6 +90,10 @@ settings.gradle.kts
 build.gradle.kts
 app/
   build.gradle.kts
+  src/debug/java/com/beltforblind/route/location/
+    LocationSimulationProvider.kt
+  src/release/java/com/beltforblind/route/location/
+    LocationSimulationProvider.kt
   src/main/
     AndroidManifest.xml
     java/com/beltforblind/
@@ -105,6 +110,7 @@ app/
           LocationDataSource.kt
           AMapLocationDataSource.kt
           AMapMapLocationSource.kt
+          LocationSimulationGateway.kt
         storage/
           RouteStore.kt
           JsonRouteStore.kt
@@ -120,6 +126,7 @@ app/
         SavedRoutesViewModel.kt
       ui/sport/
         SportScreen.kt
+        DebugGpsScreen.kt
     res/values/
       strings.xml
       styles.xml
@@ -164,6 +171,9 @@ UI 层应通过 `RouteRecorder` 使用路线记录能力，不应该直接接触
 - `LocationDataSource.kt`
 - `AMapLocationDataSource.kt`
 - `AMapMapLocationSource.kt`
+- `LocationSimulationGateway.kt`
+
+Debug 和 Release 分别提供同名的 `LocationSimulationProvider`：Debug 实现可以持续发送内部虚拟定位点；Release 实现始终不可用。
 
 定位 SDK 相关代码只应该收敛在这一层。
 
@@ -214,7 +224,7 @@ filesDir/routes/
 
 ### 5.8 `ui.sport`
 
-当前只是运动页占位入口。
+当前运动页仍是占位入口。Debug 构建中在 2.5 秒内连续点击底部“运动”入口 5 次，可打开虚拟 GPS 测试页。
 
 不要在本阶段往这里塞复杂运动逻辑。
 
@@ -360,6 +370,17 @@ accuracy > 8m：丢弃
 16. 点击路线进入详情页。
 17. 确认地图路线、平均定位精度和橙色末端切线箭头正常。
 18. 重启 App 后再次进入“已保存”，确认路线仍可读取。
+```
+
+Debug 虚拟 GPS 测试流程：
+
+```text
+1. 在 2.5 秒内连续点击底部“运动”入口 5 次。
+2. 选择测试路线并启动虚拟 GPS。
+3. 点击“进入记录页测试”。
+4. 点击 GO 并等待 15 秒预热。
+5. 检查点数、轨迹、精度过滤、保存和切线结果。
+6. 回到虚拟 GPS 测试页并点击停止。
 ```
 
 测试依赖：

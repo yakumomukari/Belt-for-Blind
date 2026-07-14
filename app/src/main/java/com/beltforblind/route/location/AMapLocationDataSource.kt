@@ -10,9 +10,16 @@ class AMapLocationDataSource(
 ) : LocationDataSource {
     private val appContext = context.applicationContext
     private var locationClient: AMapLocationClient? = null
+    private var simulationListener: ((RoutePoint) -> Unit)? = null
 
     override fun start(onPoint: (RoutePoint) -> Unit) {
         stop()
+
+        if (LocationSimulationProvider.isEnabled) {
+            simulationListener = onPoint
+            LocationSimulationProvider.addListener(onPoint)
+            return
+        }
 
         AMapLocationClient.updatePrivacyShow(appContext, true, true)
         AMapLocationClient.updatePrivacyAgree(appContext, true)
@@ -48,6 +55,8 @@ class AMapLocationDataSource(
     }
 
     override fun stop() {
+        simulationListener?.let(LocationSimulationProvider::removeListener)
+        simulationListener = null
         locationClient?.run {
             stopLocation()
             onDestroy()

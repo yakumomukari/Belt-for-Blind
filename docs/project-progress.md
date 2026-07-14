@@ -14,6 +14,8 @@
 - 后台长期运行
 - 云同步
 
+Debug 构建额外提供内部虚拟 GPS 测试能力，该能力不属于正式产品功能，Release 构建中不可用。
+
 ## 当前仓库状态
 
 仓库目前已经搭建了 Android/Kotlin 项目框架，并已合入一版基于 Jetpack Compose 的多页面入口。当前包含“记录”“运动”“已保存”三个页面：记录页以高德 2D 地图为主视觉，授权后显示当前位置蓝点和定位按钮；点击 GO 后开始记录，按钮变为 STOP，并显示 50% 透明度的已记录点数浮层；地图会实时绘制当前有效路径点和轨迹；点击 STOP 后弹出是否保存确认，选择“是”后进入路线命名保存界面，选择“否”后放弃本次记录并回到初始记录界面。运动页目前仅作为占位页面，后续再接入运动过程相关功能；已保存页用于独立查看本地路线列表，并可进入路线详情。路线会保存为 App 私有目录下的 JSON 文件，重启 App 后仍可读取。路线切线能力已接入已保存路线详情页，用于显示路线末端方向，但尚未接入导航、蓝牙或震动反馈。
@@ -25,6 +27,10 @@ settings.gradle.kts
 build.gradle.kts
 app/
   build.gradle.kts
+  src/debug/java/com/beltforblind/route/location/
+    LocationSimulationProvider.kt
+  src/release/java/com/beltforblind/route/location/
+    LocationSimulationProvider.kt
   src/main/
     AndroidManifest.xml
     java/com/beltforblind/
@@ -41,6 +47,7 @@ app/
           LocationDataSource.kt
           AMapLocationDataSource.kt
           AMapMapLocationSource.kt
+          LocationSimulationGateway.kt
         storage/
           RouteStore.kt
           JsonRouteStore.kt
@@ -59,6 +66,7 @@ app/
         SavedRoutesViewModel.kt
       ui/sport/
         SportScreen.kt
+        DebugGpsScreen.kt
     res/values/
       strings.xml
       styles.xml
@@ -174,6 +182,15 @@ progress
 - 点击已保存路线后进入详情页，可查看高德 2D 路线地图、定位点数量、平均定位精度和路线末端切线方向。
 - 地图详情会显示起点、终点、路径连线，并用橙色箭头显示路线末端切线方向；独立的 Canvas 路径点预览和定位点详情列表已移除。
 - 可以通过 `RouteTangentCalculator.getTangent(routePoints, currentPoint)` 获取当前位置对应的最近路线线段和切线方向。
+
+Debug 构建可测试虚拟 GPS：
+
+1. 在 2.5 秒内连续点击底部“运动”入口 5 次。
+2. 在测试页选择直线、直角转弯或精度过滤路线。
+3. 点击“启动”，再点击“进入记录页测试”。
+4. 在记录页点击 GO，等待 15 秒预热后观察点数和轨迹。
+5. 精度过滤路线交替发送 3 米和 15 米精度点，其中 15 米点应被 8 米阈值丢弃。
+6. 测试结束后回到虚拟 GPS 页面点击“停止”。
 
 这些测试依赖设备或模拟器可用定位。路线文件保存到 `filesDir/routes/`，App 重启后仍可读取。
 地图预览使用高德原生 2D `MapView`，依赖设备网络和已配置的高德 Key。
