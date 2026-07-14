@@ -38,6 +38,18 @@ class JsonRouteStore(
             .sortedByDescending { it.createdAt }
     }
 
+    override fun delete(routeId: String): Boolean {
+        if (!routesDir.exists()) {
+            return false
+        }
+
+        return runCatching {
+            val routeFile = File(routesDir, "$routeId.json")
+            val isInsideRoutesDirectory = routeFile.canonicalFile.parentFile == routesDir.canonicalFile
+            isInsideRoutesDirectory && routeFile.isFile && routeFile.delete()
+        }.getOrDefault(false)
+    }
+
     private fun RouteRecord.toJson(): JSONObject {
         return JSONObject()
             .put("id", id)

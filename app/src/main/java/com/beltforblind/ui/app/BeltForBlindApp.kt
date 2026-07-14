@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.beltforblind.ui.record.RecordScreen
+import com.beltforblind.ui.saved.SavedRoutesScreen
 import com.beltforblind.ui.sport.SportScreen
 
 @Composable
@@ -29,6 +30,7 @@ fun BeltForBlindApp() {
         when (selectedPage) {
             AppPage.Record -> RecordScreen(modifier = Modifier.padding(padding))
             AppPage.Sport -> SportScreen(modifier = Modifier.padding(padding))
+            AppPage.Saved -> SavedRoutesScreen(modifier = Modifier.padding(padding))
         }
     }
 }
@@ -39,6 +41,7 @@ private enum class AppPage(
 ) {
     Record(label = "记录", shortLabel = "记"),
     Sport(label = "运动", shortLabel = "动"),
+    Saved(label = "已保存", shortLabel = "存"),
 }
 
 @Composable

@@ -6,4 +6,6 @@ interface RouteStore {
     fun save(route: RouteRecord): RouteRecord
 
     fun loadAll(): List<RouteRecord>
+
+    fun delete(routeId: String): Boolean
 }

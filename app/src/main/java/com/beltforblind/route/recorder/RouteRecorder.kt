@@ -25,4 +25,6 @@ interface RouteRecorder {
     fun saveRoute(name: String): RouteRecord
 
     fun loadRoutes(): List<RouteRecord>
+
+    fun deleteRoute(routeId: String): Boolean
 }

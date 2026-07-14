@@ -120,6 +120,10 @@ class RouteRecordingManager(
         return routeStore.loadAll()
     }
 
+    override fun deleteRoute(routeId: String): Boolean {
+        return routeStore.delete(routeId)
+    }
+
     private companion object {
         const val MAX_ACCEPTED_ACCURACY_METERS = 8f
         const val WARMUP_DURATION_MS = 15_000L

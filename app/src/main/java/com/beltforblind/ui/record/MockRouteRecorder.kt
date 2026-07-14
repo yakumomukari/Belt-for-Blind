@@ -86,4 +86,8 @@ class MockRouteRecorder : RouteRecorder {
     }
 
     override fun loadRoutes(): List<RouteRecord> = savedRoutes.toList()
+
+    override fun deleteRoute(routeId: String): Boolean {
+        return savedRoutes.removeAll { it.id == routeId }
+    }
 }

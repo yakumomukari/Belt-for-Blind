@@ -81,7 +81,7 @@ class RecordViewModel(
                 _latestPointAccepted.value = routeRecorder.isLatestPointAccepted()
                 _discardedPointCount.value = routeRecorder.getDiscardedPointCount()
                 _warmupRemainingSeconds.value = routeRecorder.getWarmupRemainingSeconds()
-                _recentPoints.value = routeRecorder.getCurrentPoints().takeLast(5)
+                _recentPoints.value = routeRecorder.getCurrentPoints()
                 delay(1000)
             }
         }
@@ -99,7 +99,7 @@ class RecordViewModel(
         _latestPointAccepted.value = routeRecorder.isLatestPointAccepted()
         _discardedPointCount.value = routeRecorder.getDiscardedPointCount()
         _warmupRemainingSeconds.value = routeRecorder.getWarmupRemainingSeconds()
-        _recentPoints.value = routeRecorder.getCurrentPoints().takeLast(5)
+        _recentPoints.value = routeRecorder.getCurrentPoints()
         _uiState.value = RecordingUiState.Stopped(count, accuracy)
     }
 
@@ -124,6 +124,18 @@ class RecordViewModel(
 
     fun onPermissionDenied() {
         _uiState.value = RecordingUiState.PermissionDenied
+    }
+
+    fun resetToIdle() {
+        pollingJob?.cancel()
+        _uiState.value = RecordingUiState.Idle
+        _pointCount.value = 0
+        _latestAccuracy.value = null
+        _latestReceivedAccuracy.value = null
+        _latestPointAccepted.value = null
+        _discardedPointCount.value = 0
+        _warmupRemainingSeconds.value = 0L
+        _recentPoints.value = emptyList()
     }
 
     override fun onCleared() {

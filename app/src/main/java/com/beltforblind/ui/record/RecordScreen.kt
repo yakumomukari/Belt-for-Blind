@@ -5,9 +5,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,16 +16,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,10 +41,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -50,12 +55,20 @@ import com.amap.api.maps2d.MapView
 import com.amap.api.maps2d.model.LatLng
 import com.amap.api.maps2d.model.LatLngBounds
 import com.amap.api.maps2d.model.MarkerOptions
+import com.amap.api.maps2d.model.MyLocationStyle
 import com.amap.api.maps2d.model.PolylineOptions
+import com.beltforblind.route.location.AMapMapLocationSource
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
+import com.beltforblind.route.tangent.RouteTangent
+import com.beltforblind.route.tangent.RouteTangentCalculator
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 fun RecordScreen(modifier: Modifier = Modifier) {
@@ -65,28 +78,32 @@ fun RecordScreen(modifier: Modifier = Modifier) {
     )
     val uiState by viewModel.uiState.collectAsState()
     val pointCount by viewModel.pointCount.collectAsState()
-    val accuracy by viewModel.latestAccuracy.collectAsState()
-    val latestReceivedAccuracy by viewModel.latestReceivedAccuracy.collectAsState()
-    val latestPointAccepted by viewModel.latestPointAccepted.collectAsState()
-    val discardedPointCount by viewModel.discardedPointCount.collectAsState()
-    val warmupRemainingSeconds by viewModel.warmupRemainingSeconds.collectAsState()
     val recentPoints by viewModel.recentPoints.collectAsState()
-    val savedRoutes by viewModel.savedRoutes.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var routeName by remember { mutableStateOf("") }
-    var selectedRoute by remember { mutableStateOf<RouteRecord?>(null) }
+    var showStopConfirmDialog by remember { mutableStateOf(false) }
+    var showSavePanel by remember { mutableStateOf(false) }
+    var locationPermissionGranted by remember { mutableStateOf(context.hasLocationPermission()) }
+    var startRecordingAfterPermission by remember { mutableStateOf(false) }
+    var mapLocationError by remember { mutableStateOf<String?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
-        val granted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-            grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        val granted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        locationPermissionGranted = granted
         if (granted) {
-            viewModel.startRecording()
+            if (startRecordingAfterPermission) {
+                viewModel.startRecording()
+            } else {
+                viewModel.resetToIdle()
+            }
         } else {
             viewModel.onPermissionDenied()
         }
+        startRecordingAfterPermission = false
     }
-    val requestLocationPermission = {
+    val requestLocationPermission: (Boolean) -> Unit = { startRecordingAfterGrant ->
+        startRecordingAfterPermission = startRecordingAfterGrant
         permissionLauncher.launch(
             arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -95,19 +112,44 @@ fun RecordScreen(modifier: Modifier = Modifier) {
         )
     }
     val startRecording = {
+        routeName = ""
+        showStopConfirmDialog = false
+        showSavePanel = false
         if (context.hasLocationPermission()) {
+            locationPermissionGranted = true
             viewModel.startRecording()
         } else {
-            requestLocationPermission()
+            requestLocationPermission(true)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!locationPermissionGranted) {
+            requestLocationPermission(false)
         }
     }
 
     LaunchedEffect(uiState) {
         when (uiState) {
-            RecordingUiState.SaveSuccess -> snackbarHostState.showSnackbar("路线保存成功")
-            RecordingUiState.SaveFailure -> snackbarHostState.showSnackbar("路线保存失败")
+            RecordingUiState.SaveSuccess -> {
+                snackbarHostState.showSnackbar("路线保存成功")
+                routeName = ""
+                showSavePanel = false
+                viewModel.resetToIdle()
+            }
+            RecordingUiState.SaveFailure -> {
+                showSavePanel = true
+                snackbarHostState.showSnackbar("路线保存失败")
+            }
             RecordingUiState.PermissionDenied -> snackbarHostState.showSnackbar("定位权限未授权")
             else -> Unit
+        }
+    }
+
+    LaunchedEffect(mapLocationError) {
+        mapLocationError?.let { message ->
+            snackbarHostState.showSnackbar(message)
+            mapLocationError = null
         }
     }
 
@@ -115,101 +157,79 @@ fun RecordScreen(modifier: Modifier = Modifier) {
         modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
-        val selected = selectedRoute
-        if (selected != null) {
-            RouteDetailScreen(
-                route = selected,
-                onBack = { selectedRoute = null },
-                modifier = Modifier.padding(padding),
-            )
-            return@Scaffold
-        }
-
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(padding),
         ) {
-            StatusCard(state = uiState)
+            RecordingMapBackground(
+                points = recentPoints,
+                locationPermissionGranted = locationPermissionGranted,
+                onLocationError = { code, message ->
+                    mapLocationError = "定位失败（$code）：$message"
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            val showFloatingInfo = uiState is RecordingUiState.Recording
 
             if (uiState is RecordingUiState.PermissionDenied) {
-                PermissionRequestCard(onRequestPermission = requestLocationPermission)
+                PermissionRequestCard(
+                    onRequestPermission = { requestLocationPermission(false) },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp),
+                )
             }
 
-            DataRow(label = "已记录点数", value = pointCount.toString())
-            DataRow(label = "已丢弃点数", value = discardedPointCount.toString())
-            DataRow(
-                label = "GPS 预热",
-                value = if (warmupRemainingSeconds > 0L) "剩余 ${warmupRemainingSeconds} 秒" else "已完成",
-            )
-            DataRow(label = "最近已保存精度", value = accuracy?.let { "%.1f 米".format(it) } ?: "--")
-            DataRow(
-                label = "最近原始精度",
-                value = latestReceivedAccuracy?.let { "%.1f 米".format(it) } ?: "--",
-            )
-            DataRow(
-                label = "精度状态",
-                value = latestPointAccepted.formatAccuracyStatus(),
-                boldValue = true,
-            )
+            if (showFloatingInfo) {
+                RecordingMetricsPanel(
+                    pointCount = pointCount,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 20.dp, vertical = 20.dp),
+                )
 
-            if (recentPoints.isNotEmpty()) {
-                RecentPointList(points = recentPoints)
             }
 
-            OutlinedTextField(
-                value = routeName,
-                onValueChange = { routeName = it },
-                label = { Text("路线名称") },
-                enabled = uiState is RecordingUiState.Stopped || uiState is RecordingUiState.SaveFailure,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    onClick = startRecording,
-                    enabled = uiState is RecordingUiState.Idle ||
-                        uiState is RecordingUiState.Stopped ||
-                        uiState is RecordingUiState.SaveSuccess ||
-                        uiState is RecordingUiState.SaveFailure,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("开始记录")
-                }
-
-                Button(
-                    onClick = { viewModel.stopRecording() },
-                    enabled = uiState is RecordingUiState.Recording,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("停止记录")
-                }
+            if (showSavePanel) {
+                SaveRoutePanel(
+                    routeName = routeName,
+                    onRouteNameChange = { routeName = it },
+                    onSave = { viewModel.saveRoute(routeName) },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 116.dp),
+                )
             }
 
-            Button(
-                onClick = { viewModel.saveRoute(routeName) },
-                enabled = (uiState is RecordingUiState.Stopped || uiState is RecordingUiState.SaveFailure) &&
-                    routeName.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("保存路线")
+            if (!showSavePanel && !showStopConfirmDialog) {
+                BottomRecordingControls(
+                    state = uiState,
+                    onStart = startRecording,
+                    onStop = {
+                        viewModel.stopRecording()
+                        showStopConfirmDialog = true
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                )
             }
 
-            TextButton(
-                onClick = { viewModel.loadRoutes() },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("查看已保存路线")
-            }
-
-            if (savedRoutes.isNotEmpty()) {
-                SavedRouteList(
-                    routes = savedRoutes,
-                    onRouteClick = { selectedRoute = it },
+            if (showStopConfirmDialog) {
+                StopConfirmDialog(
+                    onSave = {
+                        showStopConfirmDialog = false
+                        showSavePanel = true
+                    },
+                    onDiscard = {
+                        showStopConfirmDialog = false
+                        showSavePanel = false
+                        routeName = ""
+                        viewModel.resetToIdle()
+                    },
                 )
             }
         }
@@ -251,27 +271,222 @@ private fun StatusCard(state: RecordingUiState) {
 }
 
 private fun Context.hasLocationPermission(): Boolean {
-    val fineGranted = ContextCompat.checkSelfPermission(
+    return ContextCompat.checkSelfPermission(
         this,
         Manifest.permission.ACCESS_FINE_LOCATION,
     ) == PackageManager.PERMISSION_GRANTED
-    val coarseGranted = ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.ACCESS_COARSE_LOCATION,
-    ) == PackageManager.PERMISSION_GRANTED
-    return fineGranted || coarseGranted
 }
 
 @Composable
-private fun PermissionRequestCard(onRequestPermission: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+private fun RecordingMapBackground(
+    points: List<RoutePoint>,
+    locationPermissionGranted: Boolean,
+    onLocationError: (code: Int, message: String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val mapLocationSource = remember {
+        AMapMapLocationSource(
+            context = context.applicationContext,
+            onLocationError = onLocationError,
+        )
+    }
+    val mapView = remember {
+        MapView(context).apply {
+            onCreate(null)
+            map.uiSettings.isZoomControlsEnabled = false
+            map.uiSettings.isMyLocationButtonEnabled = true
+            map.setLocationSource(mapLocationSource)
+            map.setMyLocationStyle(
+                MyLocationStyle()
+                    .myLocationType(MyLocationStyle.LOCATION_TYPE_FOLLOW)
+                    .interval(MAP_LOCATION_INTERVAL_MS)
+                    .strokeColor(android.graphics.Color.rgb(21, 101, 192))
+                    .radiusFillColor(android.graphics.Color.argb(40, 21, 101, 192))
+                    .strokeWidth(2f),
+            )
+        }
+    }
+
+    DisposableEffect(mapView) {
+        mapView.onResume()
+        onDispose {
+            mapView.map.isMyLocationEnabled = false
+            mapLocationSource.deactivate()
+            mapView.onPause()
+            mapView.onDestroy()
+        }
+    }
+
+    AndroidView(
+        factory = { mapView },
+        update = { view ->
+            if (view.map.isMyLocationEnabled != locationPermissionGranted) {
+                view.map.isMyLocationEnabled = locationPermissionGranted
+            }
+            view.renderLiveRoute(
+                points = points,
+                currentLocationVisible = locationPermissionGranted,
+            )
+        },
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun RecordingMetricsPanel(
+    pointCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = Color.White.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(18.dp),
+        shadowElevation = 2.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("已记录点数", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = pointCount.toString(),
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun StopConfirmDialog(
+    onSave: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("是否保存本次记录？") },
+        text = { Text("选择“是”后进入保存界面并输入路线名称；选择“否”将放弃本次记录并返回初始记录界面。") },
+        confirmButton = {
+            TextButton(onClick = onSave) {
+                Text("是")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDiscard) {
+                Text("否")
+            }
+        },
+    )
+}
+
+@Composable
+private fun SaveRoutePanel(
+    routeName: String,
+    onRouteNameChange: (String) -> Unit,
+    onSave: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = Color.White.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(18.dp),
+        shadowElevation = 4.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedTextField(
+                value = routeName,
+                onValueChange = onRouteNameChange,
+                label = { Text("路线名称") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Button(
+                onClick = onSave,
+                enabled = routeName.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("保存路线")
+            }
+        }
+    }
+}
+
+@Composable
+private fun BottomRecordingControls(
+    state: RecordingUiState,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isRecording = state is RecordingUiState.Recording
+    val canStart = state is RecordingUiState.Idle ||
+        state is RecordingUiState.SaveSuccess ||
+        state is RecordingUiState.SaveFailure
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(124.dp),
+    ) {
+        MainRecordButton(
+            text = if (isRecording) "STOP" else "GO",
+            enabled = isRecording || canStart,
+            active = isRecording,
+            onClick = {
+                if (isRecording) {
+                    onStop()
+                } else {
+                    onStart()
+                }
+            },
+            modifier = Modifier.align(Alignment.Center),
+        )
+    }
+}
+
+@Composable
+private fun MainRecordButton(
+    text: String,
+    enabled: Boolean,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val color = if (active) Color(0xFFE53935) else Color(0xFF7CFC00)
+    Box(
+        modifier = modifier
+            .size(112.dp)
+            .background(color = color, shape = CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.displaySmall,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF17206B),
+        )
+    }
+}
+
+@Composable
+private fun PermissionRequestCard(
+    onRequestPermission: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("需要定位权限后才能记录路线")
+            Text("需要精确位置权限才能显示当前位置并记录路线")
             Button(onClick = onRequestPermission) {
-                Text("重新申请定位权限")
+                Text("授权精确位置")
             }
         }
     }
@@ -297,49 +512,19 @@ private fun DataRow(
 }
 
 @Composable
-private fun RecentPointList(points: List<RoutePoint>) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("最近定位点", style = MaterialTheme.typography.titleMedium)
-        points.forEachIndexed { index, point ->
-            PointCard(
-                title = "最近第 ${index + 1} 个点",
-                point = point,
-            )
-        }
-    }
-}
-
-@Composable
-private fun SavedRouteList(
-    routes: List<RouteRecord>,
-    onRouteClick: (RouteRecord) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("已保存路线", style = MaterialTheme.typography.titleMedium)
-        routes.forEach { route ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onRouteClick(route) },
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(route.name, style = MaterialTheme.typography.titleSmall)
-                    Text("${route.points.size} 个点，点击查看详情")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RouteDetailScreen(
+internal fun RouteDetailScreen(
     route: RouteRecord,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val averageAccuracy = route.points
+        .mapNotNull(RoutePoint::accuracy)
+        .takeIf { it.isNotEmpty() }
+        ?.average()
+    val tangent = remember(route.points) {
+        RouteTangentCalculator.getLatestTangent(route.points)
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -355,29 +540,26 @@ private fun RouteDetailScreen(
         DataRow(label = "路线 ID", value = route.id)
         DataRow(label = "创建时间", value = route.createdAt.formatTimestamp())
         DataRow(label = "定位点数量", value = route.points.size.toString())
+        DataRow(
+            label = "平均定位精度",
+            value = averageAccuracy?.let { "%.1f 米".format(it) } ?: "--",
+        )
+        DataRow(
+            label = "末端切线方向",
+            value = tangent?.let {
+                "${it.tangentBearingDegrees.toDirectionName()} %.1f°".format(it.tangentBearingDegrees)
+            } ?: "至少需要 2 个有效点",
+        )
 
-        MapRoutePreview(points = route.points)
-        RoutePreview(points = route.points)
-
-        Text("定位点详情", style = MaterialTheme.typography.titleMedium)
-        if (route.points.isEmpty()) {
-            Text("这条路线没有有效定位点")
-        } else {
-            route.points.take(MAX_DETAIL_POINTS).forEachIndexed { index, point ->
-                PointCard(
-                    title = "第 ${index + 1} 个点",
-                    point = point,
-                )
-            }
-            if (route.points.size > MAX_DETAIL_POINTS) {
-                Text("仅显示前 $MAX_DETAIL_POINTS 个点，共 ${route.points.size} 个点")
-            }
-        }
+        MapRoutePreview(points = route.points, tangent = tangent)
     }
 }
 
 @Composable
-private fun MapRoutePreview(points: List<RoutePoint>) {
+private fun MapRoutePreview(
+    points: List<RoutePoint>,
+    tangent: RouteTangent?,
+) {
     val context = LocalContext.current
     val mapView = remember {
         MapView(context).apply {
@@ -402,95 +584,16 @@ private fun MapRoutePreview(points: List<RoutePoint>) {
             AndroidView(
                 factory = { mapView },
                 update = { view ->
-                    view.renderRoute(points)
+                    view.renderRoute(points, tangent)
                 },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(520.dp),
             )
             Text(
-                text = "高德 2D 地图预览：蓝色为起点，红色为终点，绿色为路径点。",
+                text = "蓝色为起点，红色为终点，绿色为路线，橙色箭头为末端切线方向。",
                 style = MaterialTheme.typography.bodySmall,
             )
-        }
-    }
-}
-
-@Composable
-private fun RoutePreview(points: List<RoutePoint>) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("路径点预览", style = MaterialTheme.typography.titleMedium)
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(220.dp),
-            ) {
-                if (points.isEmpty()) {
-                    return@Canvas
-                }
-
-                val minLat = points.minOf { it.latitude }
-                val maxLat = points.maxOf { it.latitude }
-                val minLon = points.minOf { it.longitude }
-                val maxLon = points.maxOf { it.longitude }
-                val latRange = (maxLat - minLat).takeIf { it != 0.0 } ?: 1.0
-                val lonRange = (maxLon - minLon).takeIf { it != 0.0 } ?: 1.0
-                val paddingPx = 24.dp.toPx()
-
-                fun mapPoint(point: RoutePoint): Offset {
-                    val xRatio = ((point.longitude - minLon) / lonRange).toFloat()
-                    val yRatio = ((point.latitude - minLat) / latRange).toFloat()
-                    val x = paddingPx + xRatio * (size.width - paddingPx * 2)
-                    val y = size.height - paddingPx - yRatio * (size.height - paddingPx * 2)
-                    return Offset(x, y)
-                }
-
-                val offsets = points.map(::mapPoint)
-                for (index in 0 until offsets.lastIndex) {
-                    drawLine(
-                        color = Color(0xFF2E7D32),
-                        start = offsets[index],
-                        end = offsets[index + 1],
-                        strokeWidth = 5f,
-                        cap = StrokeCap.Round,
-                    )
-                }
-
-                offsets.forEachIndexed { index, offset ->
-                    val color = when (index) {
-                        0 -> Color(0xFF1565C0)
-                        offsets.lastIndex -> Color(0xFFC62828)
-                        else -> Color(0xFF2E7D32)
-                    }
-                    drawCircle(color = color, radius = 7f, center = offset)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PointCard(
-    title: String,
-    point: RoutePoint,
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text("纬度：%.6f".format(point.latitude))
-            Text("经度：%.6f".format(point.longitude))
-            Text("时间：${point.timestamp.formatTimestamp()}")
-            Text("精度：${point.accuracy?.let { "%.1f 米".format(it) } ?: "--"}")
         }
     }
 }
@@ -507,13 +610,43 @@ private fun Boolean?.formatAccuracyStatus(): String {
     }
 }
 
-private fun MapView.renderRoute(points: List<RoutePoint>) {
+private fun MapView.renderLiveRoute(
+    points: List<RoutePoint>,
+    currentLocationVisible: Boolean,
+) {
     val aMap = map
     aMap.clear()
 
     val latLngs = points.map { LatLng(it.latitude, it.longitude) }
     if (latLngs.isEmpty()) {
-        aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(31.2304, 121.4737), 15f))
+        if (!currentLocationVisible) {
+            aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(DEFAULT_MAP_CENTER, 19f))
+        }
+        return
+    }
+
+    if (latLngs.size > 1) {
+        aMap.addPolyline(
+            PolylineOptions()
+                .addAll(latLngs)
+                .width(12f)
+                .color(POLYLINE_COLOR),
+        )
+    }
+
+    aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLngs.last(), 20f))
+}
+
+private fun MapView.renderRoute(
+    points: List<RoutePoint>,
+    tangent: RouteTangent?,
+) {
+    val aMap = map
+    aMap.clear()
+
+    val latLngs = points.map { LatLng(it.latitude, it.longitude) }
+    if (latLngs.isEmpty()) {
+        aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(DEFAULT_MAP_CENTER, 15f))
         return
     }
 
@@ -523,6 +656,13 @@ private fun MapView.renderRoute(points: List<RoutePoint>) {
                 .addAll(latLngs)
                 .width(14f)
                 .color(POLYLINE_COLOR),
+        )
+    }
+
+    val tangentEnd = tangent?.let {
+        addTangentArrow(
+            start = latLngs.last(),
+            bearingDegrees = it.tangentBearingDegrees,
         )
     }
 
@@ -561,6 +701,7 @@ private fun MapView.renderRoute(points: List<RoutePoint>) {
 
     val bounds = LatLngBounds.Builder().also { builder ->
         latLngs.forEach(builder::include)
+        tangentEnd?.let(builder::include)
     }.build()
     aMap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 24))
 
@@ -578,11 +719,57 @@ private fun MapView.renderRoute(points: List<RoutePoint>) {
     }
 }
 
+private fun MapView.addTangentArrow(
+    start: LatLng,
+    bearingDegrees: Double,
+): LatLng {
+    val end = start.destinationPoint(bearingDegrees, TANGENT_LENGTH_METERS)
+    val leftWing = end.destinationPoint(bearingDegrees + 150.0, TANGENT_ARROW_WING_METERS)
+    val rightWing = end.destinationPoint(bearingDegrees - 150.0, TANGENT_ARROW_WING_METERS)
+    val options = PolylineOptions()
+        .width(16f)
+        .color(TANGENT_COLOR)
+
+    map.addPolyline(PolylineOptions().add(start, end).width(16f).color(TANGENT_COLOR))
+    map.addPolyline(options.add(leftWing, end, rightWing))
+    return end
+}
+
+private fun LatLng.destinationPoint(
+    bearingDegrees: Double,
+    distanceMeters: Double,
+): LatLng {
+    val angularDistance = distanceMeters / EARTH_RADIUS_METERS
+    val bearing = Math.toRadians(bearingDegrees)
+    val latitude = Math.toRadians(this.latitude)
+    val longitude = Math.toRadians(this.longitude)
+    val destinationLatitude = asin(
+        sin(latitude) * cos(angularDistance) +
+            cos(latitude) * sin(angularDistance) * cos(bearing),
+    )
+    val destinationLongitude = longitude + atan2(
+        sin(bearing) * sin(angularDistance) * cos(latitude),
+        cos(angularDistance) - sin(latitude) * sin(destinationLatitude),
+    )
+    return LatLng(Math.toDegrees(destinationLatitude), Math.toDegrees(destinationLongitude))
+}
+
+private fun Double.toDirectionName(): String {
+    val directions = listOf("北", "东北", "东", "东南", "南", "西南", "西", "西北")
+    val index = ((this + 22.5) / 45.0).toInt() % directions.size
+    return directions[index]
+}
+
 private const val START_HUE = 210f
 private const val END_HUE = 0f
 private const val ROUTE_HUE = 120f
+private val DEFAULT_MAP_CENTER = LatLng(39.9928, 116.3109)
 private val POLYLINE_COLOR = android.graphics.Color.rgb(46, 125, 50)
+private val TANGENT_COLOR = android.graphics.Color.rgb(255, 109, 0)
 private const val TINY_ROUTE_DEGREES = 0.001
 private const val SMALL_ROUTE_DEGREES = 0.003
 private const val MAX_VISIBLE_MARKERS = 80
-private const val MAX_DETAIL_POINTS = 20
+private const val EARTH_RADIUS_METERS = 6_371_000.0
+private const val TANGENT_LENGTH_METERS = 30.0
+private const val TANGENT_ARROW_WING_METERS = 8.0
+private const val MAP_LOCATION_INTERVAL_MS = 3000L
