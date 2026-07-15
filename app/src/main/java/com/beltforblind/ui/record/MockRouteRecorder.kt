@@ -30,6 +30,14 @@ class MockRouteRecorder : RouteRecorder {
         recording = false
     }
 
+    override fun pauseRecord() {
+        recording = false
+    }
+
+    override fun resumeRecord() {
+        if (recordingStartedAt != 0L) recording = true
+    }
+
     override fun getPointCount(): Int {
         if (recording) {
             latestReceivedAccuracy = random.nextFloat() * 25f + 2f

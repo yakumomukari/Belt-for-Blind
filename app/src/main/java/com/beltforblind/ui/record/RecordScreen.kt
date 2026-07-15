@@ -5,8 +5,13 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,18 +26,32 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.rememberBottomSheetScaffoldState
+import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -40,13 +59,21 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -62,6 +89,9 @@ import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.tangent.RouteTangent
 import com.beltforblind.route.tangent.RouteTangentCalculator
+import com.beltforblind.ui.theme.BeltColors
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -79,6 +109,12 @@ fun RecordScreen(modifier: Modifier = Modifier) {
     val uiState by viewModel.uiState.collectAsState()
     val pointCount by viewModel.pointCount.collectAsState()
     val recentPoints by viewModel.recentPoints.collectAsState()
+    val latestReceivedAccuracy by viewModel.latestReceivedAccuracy.collectAsState()
+    val latestPointAccepted by viewModel.latestPointAccepted.collectAsState()
+    val warmupRemainingSeconds by viewModel.warmupRemainingSeconds.collectAsState()
+    val discardedPointCount by viewModel.discardedPointCount.collectAsState()
+    val elapsedTimeSeconds by viewModel.elapsedTimeSeconds.collectAsState()
+    val distanceMeters = remember(recentPoints) { recentPoints.totalRecordedDistanceMeters() }
     val snackbarHostState = remember { SnackbarHostState() }
     var routeName by remember { mutableStateOf("") }
     var showStopConfirmDialog by remember { mutableStateOf(false) }
@@ -162,60 +198,71 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            RecordingMapBackground(
-                points = recentPoints,
-                locationPermissionGranted = locationPermissionGranted,
-                onLocationError = { code, message ->
-                    mapLocationError = "定位失败（$code）：$message"
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-
-            val showFloatingInfo = uiState is RecordingUiState.Recording
-
-            if (uiState is RecordingUiState.PermissionDenied) {
-                PermissionRequestCard(
-                    onRequestPermission = { requestLocationPermission(false) },
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(24.dp),
-                )
-            }
-
-            if (showFloatingInfo) {
-                RecordingMetricsPanel(
+            if (
+                (uiState is RecordingUiState.Recording || uiState is RecordingUiState.Paused) &&
+                !showSavePanel &&
+                !showStopConfirmDialog
+            ) {
+                ActiveRecordingContent(
+                    points = recentPoints,
                     pointCount = pointCount,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(horizontal = 20.dp, vertical = 20.dp),
-                )
-
-            }
-
-            if (showSavePanel) {
-                SaveRoutePanel(
-                    routeName = routeName,
-                    onRouteNameChange = { routeName = it },
-                    onSave = { viewModel.saveRoute(routeName) },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 20.dp)
-                        .padding(bottom = 116.dp),
-                )
-            }
-
-            if (!showSavePanel && !showStopConfirmDialog) {
-                BottomRecordingControls(
-                    state = uiState,
-                    onStart = startRecording,
-                    onStop = {
+                    distanceMeters = distanceMeters,
+                    elapsedTimeSeconds = elapsedTimeSeconds,
+                    accuracy = latestReceivedAccuracy,
+                    latestPointAccepted = latestPointAccepted,
+                    discardedPointCount = discardedPointCount,
+                    warmupRemainingSeconds = warmupRemainingSeconds,
+                    isPaused = uiState is RecordingUiState.Paused,
+                    locationPermissionGranted = locationPermissionGranted,
+                    onLocationError = { code, message ->
+                        mapLocationError = "定位失败（$code）：$message"
+                    },
+                    onPause = viewModel::pauseRecording,
+                    onResume = viewModel::resumeRecording,
+                    onFinish = {
                         viewModel.stopRecording()
                         showStopConfirmDialog = true
                     },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                    modifier = Modifier.fillMaxSize(),
                 )
+            } else {
+                RecordingMapBackground(
+                    points = recentPoints,
+                    locationPermissionGranted = locationPermissionGranted,
+                    onLocationError = { code, message ->
+                        mapLocationError = "定位失败（$code）：$message"
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+
+                if (uiState is RecordingUiState.PermissionDenied) {
+                    PermissionRequestCard(
+                        onRequestPermission = { requestLocationPermission(false) },
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp),
+                    )
+                }
+
+                if (showSavePanel) {
+                    SaveRoutePanel(
+                        pointCount = pointCount,
+                        routeName = routeName,
+                        onRouteNameChange = { routeName = it },
+                        onSave = { viewModel.saveRoute(routeName) },
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                } else if (!showStopConfirmDialog) {
+                    MainRecordButton(
+                        text = "GO",
+                        enabled = uiState !is RecordingUiState.PermissionDenied,
+                        active = false,
+                        onClick = startRecording,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 24.dp),
+                    )
+                }
             }
 
             if (showStopConfirmDialog) {
@@ -230,40 +277,6 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                         routeName = ""
                         viewModel.resetToIdle()
                     },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatusCard(state: RecordingUiState) {
-    val (text, color) = when (state) {
-        RecordingUiState.Idle -> "未开始" to MaterialTheme.colorScheme.outline
-        RecordingUiState.Recording -> "记录中" to Color(0xFF2E7D32)
-        is RecordingUiState.Stopped -> "已停止，等待保存" to MaterialTheme.colorScheme.primary
-        RecordingUiState.SaveSuccess -> "保存成功" to Color(0xFF2E7D32)
-        RecordingUiState.SaveFailure -> "保存失败" to MaterialTheme.colorScheme.error
-        RecordingUiState.PermissionDenied -> "定位权限未授权" to Color(0xFFFFA000)
-    }
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.12f)),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.headlineMedium,
-                color = color,
-            )
-
-            if (state is RecordingUiState.Recording) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "正在接收 GPS 定位点",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = color,
                 )
             }
         }
@@ -333,29 +346,292 @@ private fun RecordingMapBackground(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RecordingMetricsPanel(
+private fun ActiveRecordingContent(
+    points: List<RoutePoint>,
     pointCount: Int,
+    distanceMeters: Double,
+    elapsedTimeSeconds: Long,
+    accuracy: Float?,
+    latestPointAccepted: Boolean?,
+    discardedPointCount: Int,
+    warmupRemainingSeconds: Long,
+    isPaused: Boolean,
+    locationPermissionGranted: Boolean,
+    onLocationError: (code: Int, message: String) -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onFinish: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = Color.White.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(18.dp),
-        shadowElevation = 2.dp,
+    val sheetState = rememberStandardBottomSheetState(
+        initialValue = SheetValue.PartiallyExpanded,
+        skipHiddenState = true,
+    )
+    val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
+    LaunchedEffect(isPaused) {
+        if (isPaused) sheetState.expand()
+    }
+    BottomSheetScaffold(
+        modifier = modifier,
+        scaffoldState = scaffoldState,
+        sheetPeekHeight = if (isPaused) 248.dp else 132.dp,
+        sheetShape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+        sheetContainerColor = BeltColors.SportPanel,
+        sheetContentColor = BeltColors.SportPanelText,
+        sheetDragHandle = { BottomSheetDefaults.DragHandle(color = BeltColors.SportPanelLabel) },
+        sheetContent = {
+            if (isPaused) {
+                PausedRecordingControls(
+                    pointCount = pointCount,
+                    distanceMeters = distanceMeters,
+                    elapsedTimeSeconds = elapsedTimeSeconds,
+                    onResume = onResume,
+                    onFinish = onFinish,
+                )
+            } else {
+                RecordingDetailsPanel(
+                    pointCount = pointCount,
+                    distanceMeters = distanceMeters,
+                    elapsedTimeSeconds = elapsedTimeSeconds,
+                    accuracy = accuracy,
+                    latestPointAccepted = latestPointAccepted,
+                    discardedPointCount = discardedPointCount,
+                    warmupRemainingSeconds = warmupRemainingSeconds,
+                    onPause = onPause,
+                )
+            }
+        },
+    ) { _ ->
+        RecordingMapBackground(
+            points = points,
+            locationPermissionGranted = locationPermissionGranted,
+            onLocationError = onLocationError,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+@Composable
+private fun RecordingDetailsPanel(
+    pointCount: Int,
+    distanceMeters: Double,
+    elapsedTimeSeconds: Long,
+    accuracy: Float?,
+    latestPointAccepted: Boolean?,
+    discardedPointCount: Int,
+    warmupRemainingSeconds: Long,
+    onPause: () -> Unit,
+) {
+    val averageSpeedKmh = averageRecordedSpeedKmh(distanceMeters, elapsedTimeSeconds)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text("已记录点数", style = MaterialTheme.typography.titleMedium)
-            Text(
-                text = pointCount.toString(),
-                style = MaterialTheme.typography.displaySmall,
-                fontWeight = FontWeight.Bold,
+            RecordMetric(
+                label = "已保存点数",
+                value = pointCount.toString(),
+            )
+            RecordMetric(
+                label = "路程",
+                value = distanceMeters.formatRecordingDistance(),
             )
         }
+        Text(
+            text = distanceMeters.formatRecordingDistance(),
+            fontSize = 48.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = if (warmupRemainingSeconds > 0L) {
+                "GPS 预热中 · ${warmupRemainingSeconds}s"
+            } else {
+                "正在记录路线"
+            },
+            color = BeltColors.SportGreen,
+            fontWeight = FontWeight.Bold,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            RecordDetail("记录时间", elapsedTimeSeconds.formatRecordingDuration())
+            RecordDetail("平均速度", "%.1f km/h".format(Locale.getDefault(), averageSpeedKmh))
+            RecordDetail("当前精度", accuracy?.let { "%.1f m".format(Locale.getDefault(), it) } ?: "--")
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            RecordDetail("定位状态", latestPointAccepted.formatAccuracyStatus())
+            RecordDetail("已丢弃点数", discardedPointCount.toString())
+        }
+        Button(
+            onClick = onPause,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.White,
+                contentColor = BeltColors.SportPanel,
+            ),
+        ) {
+            Icon(Icons.Rounded.Pause, contentDescription = null)
+            Spacer(modifier = Modifier.size(8.dp))
+            Text("暂停", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun PausedRecordingControls(
+    pointCount: Int,
+    distanceMeters: Double,
+    elapsedTimeSeconds: Long,
+    onResume: () -> Unit,
+    onFinish: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Text("记录已暂停", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(
+            text = "$pointCount 个点  ·  ${distanceMeters.formatRecordingDistance()}  ·  ${elapsedTimeSeconds.formatRecordingDuration()}",
+            color = BeltColors.SportPanelLabel,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            HoldToFinishRecordingButton(
+                onFinish = onFinish,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(80.dp),
+            )
+            Button(
+                onClick = onResume,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(80.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
+            ) {
+                Icon(Icons.Rounded.PlayArrow, contentDescription = null)
+                Spacer(modifier = Modifier.size(6.dp))
+                Text("继续", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HoldToFinishRecordingButton(
+    onFinish: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val progress = remember { Animatable(0f) }
+    val currentOnFinish by rememberUpdatedState(onFinish)
+    var holding by remember { mutableStateOf(false) }
+    Surface(
+        modifier = modifier
+            .semantics {
+                role = Role.Button
+                contentDescription = "长按 1.5 秒结束记录"
+                onLongClick(label = "结束记录") {
+                    currentOnFinish()
+                    true
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        progress.snapTo(0f)
+                        holding = true
+                        coroutineScope {
+                            var completed = false
+                            val holdJob = launch {
+                                progress.animateTo(
+                                    targetValue = 1f,
+                                    animationSpec = tween(
+                                        durationMillis = HOLD_TO_FINISH_DURATION_MS,
+                                        easing = LinearEasing,
+                                    ),
+                                )
+                                completed = true
+                                holding = false
+                                currentOnFinish()
+                            }
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                if (!completed) {
+                                    holdJob.cancel()
+                                    progress.snapTo(0f)
+                                    holding = false
+                                }
+                            }
+                        }
+                    },
+                )
+            },
+        shape = RoundedCornerShape(8.dp),
+        color = BeltColors.StopRed.copy(alpha = 0.12f),
+        contentColor = BeltColors.StopRed,
+        border = BorderStroke(2.dp, BeltColors.StopRed),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { progress.value },
+                        modifier = Modifier.size(38.dp),
+                        color = BeltColors.StopRed,
+                        trackColor = BeltColors.StopRed.copy(alpha = 0.2f),
+                        strokeWidth = 4.dp,
+                    )
+                    Icon(
+                        Icons.Rounded.Stop,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Text(
+                    if (holding) "继续按住" else "长按结束",
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordMetric(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = BeltColors.SportPanelLabel, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun RecordDetail(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = BeltColors.SportPanelLabel, fontSize = 12.sp)
     }
 }
 
@@ -383,6 +659,7 @@ private fun StopConfirmDialog(
 
 @Composable
 private fun SaveRoutePanel(
+    pointCount: Int,
     routeName: String,
     onRouteNameChange: (String) -> Unit,
     onSave: () -> Unit,
@@ -390,62 +667,66 @@ private fun SaveRoutePanel(
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = Color.White.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(18.dp),
-        shadowElevation = 4.dp,
+        color = BeltColors.SportPanel,
+        contentColor = BeltColors.SportPanelText,
+        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(top = 10.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 40.dp, height = 4.dp)
+                        .background(BeltColors.SportPanelSecondary, RoundedCornerShape(2.dp)),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("保存路线", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "已保存点数 $pointCount",
+                    color = BeltColors.SportPanelLabel,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
             OutlinedTextField(
                 value = routeName,
                 onValueChange = onRouteNameChange,
                 label = { Text("路线名称") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = BeltColors.SportPanelText,
+                    unfocusedTextColor = BeltColors.SportPanelText,
+                    focusedBorderColor = BeltColors.SportGreen,
+                    unfocusedBorderColor = BeltColors.SportPanelLabel,
+                    focusedLabelColor = BeltColors.SportGreen,
+                    unfocusedLabelColor = BeltColors.SportPanelLabel,
+                    cursorColor = BeltColors.SportGreen,
+                ),
             )
             Button(
                 onClick = onSave,
                 enabled = routeName.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
             ) {
                 Text("保存路线")
             }
         }
-    }
-}
-
-@Composable
-private fun BottomRecordingControls(
-    state: RecordingUiState,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val isRecording = state is RecordingUiState.Recording
-    val canStart = state is RecordingUiState.Idle ||
-        state is RecordingUiState.SaveSuccess ||
-        state is RecordingUiState.SaveFailure
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(124.dp),
-    ) {
-        MainRecordButton(
-            text = if (isRecording) "STOP" else "GO",
-            enabled = isRecording || canStart,
-            active = isRecording,
-            onClick = {
-                if (isRecording) {
-                    onStop()
-                } else {
-                    onStart()
-                }
-            },
-            modifier = Modifier.align(Alignment.Center),
-        )
     }
 }
 
@@ -457,19 +738,19 @@ private fun MainRecordButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val color = if (active) Color(0xFFE53935) else Color(0xFF7CFC00)
+    val color = if (active) BeltColors.StopRed else BeltColors.SportGreen
     Box(
         modifier = modifier
-            .size(112.dp)
+            .size(88.dp)
             .background(color = color, shape = CircleShape)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.displaySmall,
+            fontSize = if (active) 18.sp else 24.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF17206B),
+            color = Color.White,
         )
     }
 }
@@ -607,6 +888,25 @@ private fun Boolean?.formatAccuracyStatus(): String {
         true -> "合格，已保存"
         false -> "不合格，已丢弃"
         null -> "--"
+    }
+}
+
+private fun Double.formatRecordingDistance(): String {
+    return if (this >= 1_000.0) {
+        "%.2f km".format(Locale.getDefault(), this / 1_000.0)
+    } else {
+        "%.0f m".format(Locale.getDefault(), this)
+    }
+}
+
+private fun Long.formatRecordingDuration(): String {
+    val hours = this / 3_600
+    val minutes = this % 3_600 / 60
+    val seconds = this % 60
+    return if (hours > 0) {
+        "%02d:%02d:%02d".format(Locale.getDefault(), hours, minutes, seconds)
+    } else {
+        "%02d:%02d".format(Locale.getDefault(), minutes, seconds)
     }
 }
 
@@ -773,3 +1073,4 @@ private const val EARTH_RADIUS_METERS = 6_371_000.0
 private const val TANGENT_LENGTH_METERS = 30.0
 private const val TANGENT_ARROW_WING_METERS = 8.0
 private const val MAP_LOCATION_INTERVAL_MS = 3000L
+private const val HOLD_TO_FINISH_DURATION_MS = 1_500

@@ -1,221 +1,270 @@
 # 项目进度说明
 
-## 项目概述
+最后更新：2026-07-15
 
-本项目是一个面向盲人跑步辅助腰带的 Android/Kotlin App。当前阶段主要关注路线记录的底层能力和基础页面框架：定位点采集、路线数据维护、本地 JSON 保存、读取已保存路线、记录页地图展示、“记录 / 运动 / 已保存”多页面入口，以及路线切线方向的纯算法获取能力。
+## 1. 项目定位
 
-当前阶段不做以下正式产品功能：
+本项目是面向盲人跑步辅助腰带的 Android App 与 ESP32 固件。当前目标是先完成可靠的路线记录、路线选择、运动过程显示和腰带硬件调试，再逐步接入正式的方向决策与自动振动反馈。
 
-- 导航
-- 正式运动流程中的自动蓝牙连接和震动反馈
-- 路线匹配
-- 腰带方向识别
-- 后台长期运行
-- 云同步
+当前已经形成以下基础闭环：
 
-Debug 构建额外提供内部虚拟 GPS 测试，以及 BLE 腰带单电机手动控制能力。这些能力用于独立验证定位、通信和硬件，不属于正式产品功能，Release 构建中不可用。
+    记录路线 -> 本地保存 -> 选择路线 -> 开始运动 -> 显示路线进度
+                                          |
+                                          -> Debug BLE 手动测试八个电机
 
-## 当前仓库状态
+正式的“定位与路线匹配 -> 方向判断 -> 自动选择电机”闭环尚未完成。
 
-仓库目前已经搭建了 Android/Kotlin 项目框架，并已合入一版基于 Jetpack Compose 的多页面入口。当前包含“记录”“运动”“已保存”三个页面：记录页以高德 2D 地图为主视觉，授权后显示当前位置蓝点和定位按钮；点击 GO 后开始记录，按钮变为 STOP，并显示 50% 透明度的已记录点数浮层；地图会实时绘制当前有效路径点和轨迹；点击 STOP 后弹出是否保存确认，选择“是”后进入路线命名保存界面，选择“否”后放弃本次记录并回到初始记录界面。运动页目前仅作为占位页面，后续再接入运动过程相关功能；已保存页用于独立查看本地路线列表，并可进入路线详情。路线会保存为 App 私有目录下的 JSON 文件，重启 App 后仍可读取。路线切线能力已接入已保存路线详情页，用于显示路线末端方向。Debug 测试工具已接入 `belt_motor_test` ESP32 固件，可通过 BLE 手动选择 1 至 8 号电机，但尚未接入正式导航和自动震动反馈。
+## 2. 技术栈
 
-已创建结构：
+- Android / Kotlin
+- Jetpack Compose + Material 3
+- ViewModel + StateFlow
+- 高德 2D 地图 SDK
+- 高德定位 SDK
+- App 私有目录 JSON 存储
+- Android BLE GATT Client
+- ESP-IDF 6.x + NimBLE GATT Server
+- JUnit 4
 
-```text
-settings.gradle.kts
-build.gradle.kts
-app/
-  build.gradle.kts
-  src/debug/java/com/beltforblind/route/location/
-    LocationSimulationProvider.kt
-  src/release/java/com/beltforblind/route/location/
-    LocationSimulationProvider.kt
-  src/main/
-    AndroidManifest.xml
-    java/com/beltforblind/
-      MainActivity.kt
-      route/
-        model/
-          RoutePoint.kt
-          RouteRecord.kt
-        recorder/
-          RouteRecorder.kt
-          RouteRecordingManager.kt
-        location/
-          LocationPermissionGateway.kt
-          LocationDataSource.kt
-          AMapLocationDataSource.kt
-          AMapMapLocationSource.kt
-          LocationSimulationGateway.kt
-        storage/
-          RouteStore.kt
-          JsonRouteStore.kt
-        tangent/
-          RouteTangent.kt
-          RouteTangentCalculator.kt
-      ui/record/
-        RecordingUiState.kt
-        MockRouteRecorder.kt
-        RecordViewModel.kt
-        RecordScreen.kt
-      ui/app/
-        BeltForBlindApp.kt
-      ui/saved/
-        SavedRoutesScreen.kt
-        SavedRoutesViewModel.kt
-      ui/sport/
-        SportScreen.kt
-        DebugGpsScreen.kt
-    res/values/
-      strings.xml
-      styles.xml
-docs/project-progress.md
-```
+应用最低支持 Android 8.0（API 26），当前 compileSdk 和 targetSdk 为 35。
 
-## 已定义对外接口
+## 3. 当前页面
 
-UI 层后续应通过 `RouteRecorder` 使用路线记录能力，不应该直接接触 GPS API 或直接操作文件：
+App 底部包含“记录、运动、已保存”三个入口。
 
-```text
-startRecord()
-stopRecord()
-getPointCount()
-getLatestAccuracy()
-getLatestReceivedAccuracy()
-isLatestPointAccepted()
-getDiscardedPointCount()
-getWarmupRemainingSeconds()
-getCurrentPoints()
-saveRoute(name)
-loadRoutes()
-```
+Debug 构建中，在2.5秒内连续点击“运动”5次可进入隐藏测试工具。Release 构建不会提供虚拟 GPS 和电机调试功能。
 
-## 数据模型
+## 4. 已完成功能
 
-`RoutePoint` 当前定义了定位点必需字段：
+### 4.1 记录页面
 
-```text
-latitude
-longitude
-timestamp
-accuracy
-```
+- 使用高德 2D 地图作为主界面。
+- 申请精确定位权限并显示当前位置蓝点。
+- 高精度定位，定位请求间隔为3秒。
+- 点击 GO 开始记录。
+- 开始后进行15秒 GPS 预热，预热期定位点不保存。
+- accuracy 为空或精度大于8米的点会被丢弃。
+- 地图实时绘制已接受定位点形成的路线。
+- 折叠底栏显示已保存点数和路程。
+- 上拉底栏显示时间、平均速度、当前精度、定位状态和丢弃点数。
+- 支持暂停、继续和长按1.5秒结束记录。
+- 暂停期间停止采点并冻结计时，继续后保留已有数据。
+- 只有记录结束后才询问是否保存。
+- 选择保存后输入路线名称；选择放弃后清空本次记录。
 
-`RouteRecord` 当前定义了路线必需字段：
+当前 RouteRecorder 对外能力：
 
-```text
-id
-name
-createdAt
-points
-```
+    startRecord / pauseRecord / resumeRecord / stopRecord
+    getPointCount / getCurrentPoints
+    getLatestAccuracy / getLatestReceivedAccuracy
+    isLatestPointAccepted / getDiscardedPointCount
+    getWarmupRemainingSeconds
+    saveRoute / loadRoutes / deleteRoute
 
-## 模块边界
+### 4.2 路线存储与已保存页面
 
-- `route.model`：只放数据对象。
-- `route.recorder`：面向 UI 的记录接口和协调管理类。
-- `route.location`：定位权限和定位数据源边界。
-- `route.storage`：路线持久化边界。
-- `ui.app`：App 级页面入口和底部导航。
-- `ui.record`：记录页、页面状态、ViewModel、Mock 记录器。
-- `ui.saved`：已保存路线列表页和复用的路线详情入口。
-- `ui.sport`：运动页占位入口。
-- `route.tangent`：路线切线方向、最近路段、离路线距离和路线进度的纯算法计算。
+- 路线保存为 App 私有目录 filesDir/routes/ 下的 JSON 文件。
+- App 重启后仍可读取路线。
+- 已保存页面支持列表、刷新和空状态。
+- 点击路线进入详情。
+- 长按路线后经过二次确认删除。
+- 删除失败时显示错误提示。
+- 路线详情显示名称、ID、创建时间、点数和平均定位精度。
+- 详情地图显示起点、终点、路线和末端切线箭头。
+- 路线详情不显示逐点明细列表。
 
-## 路线切线算法
+数据模型保持精简：
 
-当前已新增 `RouteTangentCalculator`，用于从路线点中获取当前位置对应的路线切线信息。
+    RoutePoint: latitude, longitude, timestamp, accuracy
+    RouteRecord: id, name, createdAt, points
 
-输入：
+### 4.3 路线切线与进度算法
 
-```text
-routePoints: List<RoutePoint>
-currentPoint: RoutePoint
-```
+RouteTangentCalculator 可以根据路线和当前位置计算：
 
-输出 `RouteTangent`：
+- 最近路线线段
+- 在线段上的投影比例
+- 到路线的距离
+- 路线切线方向角
+- 沿路线累计距离
+- 路线总距离
+- 0.0 到 1.0 的路线进度
 
-```text
-segmentStartIndex
-segmentEndIndex
-projectionRatio
-tangentBearingDegrees
-distanceToRouteMeters
-alongRouteDistanceMeters
-totalRouteDistanceMeters
-progress
-```
+路线详情使用末端切线；运动页面使用当前位置切线和路线进度。
 
-语义：
+### 4.4 运动页面
 
-- `segmentStartIndex` / `segmentEndIndex`：当前位置投影到的最近路线线段。
-- `projectionRatio`：当前位置在线段上的投影比例，范围 `0.0..1.0`。
-- `tangentBearingDegrees`：该线段的切线方向角，正北为 `0°`，顺时针增加。
-- `distanceToRouteMeters`：当前位置到路线最近线段的距离。
-- `alongRouteDistanceMeters`：当前位置投影点距离路线起点的累计距离。
-- `totalRouteDistanceMeters`：路线总长度。
-- `progress`：路线进度，范围 `0.0..1.0`。
+运动页面已不再是占位页面，目前实现：
 
-当前算法不会修改 `RoutePoint` 或 `RouteRecord` 的保存结构，也不会直接驱动导航、蓝牙或震动电机。
+- 自动显示当前位置。
+- GPS 质量、精度数值和三格信号状态。
+- 从本地已保存路线中选择运动路线。
+- 路线列表包含加载、错误、空状态和刷新。
+- 没有路线时可以前往记录页面。
+- 只有“路线有效 + 精确定位权限 + 已获得位置”时才能开始。
+- 地图显示路线、起点、终点和当前位置。
+- 用户手动移动地图后暂停自动跟随，可点击定位按钮恢复。
+- 定位更新不会反复重置用户缩放。
+- 开始运动后显示总距离、总时长、实时配速和路线完成度。
+- 已完成路段使用不同颜色绘制。
+- Bottom Sheet 支持折叠和上拉展开。
+- 支持暂停、继续和长按1.5秒结束。
+- 继续后恢复计时、距离和路线进度。
+- 运动结束后只显示运动结果并返回运动首页，不保存运动记录。
 
-## 当前可以测试
+运动指标过滤规则：
 
-当前可以通过 UI 测试以下流程：
+- 精度必须在0至25米。
+- 小于2米的移动不累计。
+- 超过12m/s的跳点不累计。
+- 相邻点时间间隔超过30秒不累计该段。
+- 实时配速使用最近60秒的有效移动段计算。
 
-- 进入 App 后看到地图风格的记录页面。
-- 初始状态显示地图、当前位置定位蓝点、地图定位按钮和缩小后的 GO 按钮。
-- 首次进入记录页时触发精确位置权限申请；仅授予“大致位置”不满足 GPS 路线精度要求，授权后只启用地图定位，不会自动开始路线记录。
-- 授权后开始记录，GO 按钮变为 STOP。
-- App 当前通过高德定位 SDK 接收定位点，定位模式为高精度并优先 GPS。
-- 定位请求间隔为 3 秒，避免定位点刷新过快。
-- 开始记录后先进行 15 秒 GPS 预热，预热阶段收到的点只用于诊断，不保存。
-- 定位点会经过精度过滤：`accuracy == null` 或 `accuracy > 8m` 的点会被丢弃。
-- 点击 GO 后，按钮变为 STOP，记录页会通过 50% 透明度悬浮面板显示已记录点数。
-- 定位请求会等待更准确的初始位置，减少刚开始记录时的低精度点。
-- 记录页地图通过高德 2D 定位图层持续显示当前位置；记录开始后还会根据当前全部有效定位点实时绘制轨迹。
-- 点击 STOP 后会先询问是否保存；选择“是”后显示路线名称输入和保存按钮，选择“否”后放弃本次记录并回到初始记录界面。
-- 输入路线名称后可以点击“保存路线”。
-- 保存成功后记录页会自动回到初始状态。
-- 保存成功后可以通过底部“已保存”入口独立查看本地路线列表。
-- 在已保存路线列表中长按路线，可在二次确认后删除对应的本地 JSON 路线文件。
-- 点击已保存路线后进入详情页，可查看高德 2D 路线地图、定位点数量、平均定位精度和路线末端切线方向。
-- 地图详情会显示起点、终点、路径连线，并用橙色箭头显示路线末端切线方向；独立的 Canvas 路径点预览和定位点详情列表已移除。
-- 可以通过 `RouteTangentCalculator.getTangent(routePoints, currentPoint)` 获取当前位置对应的最近路线线段和切线方向。
+路线进度仅接受精度不超过25米、且距离路线在合理范围内的定位点，并阻止进度倒退。
 
-Debug 构建可测试虚拟 GPS：
+### 4.5 Debug 虚拟 GPS
 
-1. 在 2.5 秒内连续点击底部“运动”入口 5 次。
-2. 在测试页选择直线、直角转弯或精度过滤路线。
-3. 点击“启动”，再点击“进入记录页测试”。
-4. 在记录页点击 GO，等待 15 秒预热后观察点数和轨迹。
-5. 精度过滤路线交替发送 3 米和 15 米精度点，其中 15 米点应被 8 米阈值丢弃。
-6. 测试结束后回到虚拟 GPS 页面点击“停止”。
+Debug 页面提供三种固定场景：
 
-Debug 构建可测试腰带电机：
+- 直线路线：持续向东，精度3米。
+- 直角转弯路线：先向北再向东。
+- 精度过滤路线：交替发送3米和15米精度点。
 
-1. 使用 ESP-IDF 6.x 编译并烧录 `belt_motor_test`，给 ESP32 和电机驱动电路上电。
-2. 在 2.5 秒内连续点击底部“运动”入口 5 次，进入 Debug 测试工具。
-3. 点击“扫描并连接”，首次使用时允许附近设备权限。
-4. 连接 `BeltMotor` 后，点击轮盘外圈的 1 至 8 号区域控制对应电机。
-5. 点击轮盘中心 `STOP` 停止全部电机；断开连接或退出页面也会让固件停止全部电机。
+虚拟点每3秒发送一次，同时驱动记录数据源和地图当前位置。Release 中的同名 Provider 始终不可用。
 
-BLE 使用服务 UUID `8f8a0001-8f4b-4f5b-9f2b-5e7a1f000001` 和写特征 UUID `8f8a0002-8f4b-4f5b-9f2b-5e7a1f000001`。命令为单个 ASCII 字节：`1` 至 `8` 选择电机，`0` 全部停止。固件仍保留同一套 UART 命令。
+当前虚拟定位由手机内部生成，尚不支持电脑通过 ADB、HTTP 或 Socket 逐点发送自定义坐标。
 
-这些测试依赖设备或模拟器可用定位。路线文件保存到 `filesDir/routes/`，App 重启后仍可读取。
-地图预览使用高德原生 2D `MapView`，依赖设备网络和已配置的高德 Key。
+### 4.6 Debug BLE 与 ESP32 固件
 
-## 尚未实现
+Debug App 可以：
 
-以下内容仍为 TODO，后续继续实现：
+- 请求 Android 12 及以上的 BLE 权限。
+- 扫描并连接设备名 BeltMotor。
+- 使用八方向轮盘选择1至8号电机。
+- 点击轮盘中心 STOP 停止全部电机。
+- 断开或退出 Debug 页面时停止电机。
 
-- 针对记录状态、点过滤、保存读取行为的基础测试。
-- 针对路线切线计算的单元测试。
-- 更强的轨迹质量控制，例如速度跳变过滤、距离跳变过滤、平滑处理。
-- ESP32 与真实电机驱动板的 BLE 连接、轮盘映射和断连停机验证。
-- 正式运动流程中的路线匹配、方向决策和自动振动反馈。
+BLE 协议：
 
-## 建议下一步
+    Service UUID: 8f8a0001-8f4b-4f5b-9f2b-5e7a1f000001
+    Write Characteristic UUID: 8f8a0002-8f4b-4f5b-9f2b-5e7a1f000001
+    ASCII 1..8 -> 启动对应电机
+    ASCII 0    -> 停止全部电机
 
-1. 增加单元测试，覆盖点过滤、预热丢弃、保存读取、记录状态和切线计算。
-2. 在真机或模拟器上验证定位权限、开始记录、停止记录、点数和精度显示。
-3. 根据实测数据决定是否加入速度跳变过滤、距离跳变过滤或平滑处理。
+belt_motor_test 固件已经实现：
+
+- 八路1kHz、8-bit PWM。
+- 同时只启动一个电机，当前占空比为128。
+- BLE 与 UART 使用相同命令。
+- BLE 客户端断开时停止全部电机。
+- Windows ASCII 临时路径编译、烧录和串口监视脚本。
+
+固件 GPIO 映射：
+
+    1 -> GPIO4
+    2 -> GPIO13
+    3 -> GPIO14
+    4 -> GPIO18
+    5 -> GPIO19
+    6 -> GPIO21
+    7 -> GPIO22
+    8 -> GPIO23
+
+### 4.7 应用图标
+
+已经增加 Android 自适应应用图标：
+
+- 深绿色背景表示户外、安全和路线。
+- 白色横向图形表示辅助腰带。
+- 中央向上箭头表示行进方向。
+- 普通图标和圆形图标均已接入 Manifest。
+
+## 5. 当前测试状态
+
+当前有10个 JVM 单元测试，覆盖：
+
+- 记录路线距离和平均速度。
+- 记录暂停后停止采点、继续后保留已有点。
+- 运动距离与滚动配速。
+- 低质量定位过滤。
+- 不合理速度跳点过滤。
+- 暂停恢复后的距离基线。
+- 路线距离。
+- 运动开始条件。
+- 路线切线投影和进度。
+
+最近验证命令：
+
+    ./gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:compileReleaseKotlin :app:lintDebug
+
+最近结果：
+
+    Debug 单元测试通过
+    Debug APK 构建通过
+    Release Kotlin 编译通过
+    Lint 通过
+
+## 6. 尚未完成
+
+### P0：正式导航与腰带反馈
+
+- 获取手机或腰带朝向。
+- 将路线切线方向转换为相对人体方向。
+- 根据方向差选择1至8号电机。
+- 判断转弯、偏离路线、回到路线和到达终点。
+- 在正式运动页面连接 BLE 腰带。
+- 自动发送振动指令并处理断连、重连和写入失败。
+
+当前运动页的腰带状态仅为 UI 状态，真实 BLE 控制器只接入 Debug 页面。Release 电机控制器仍是不可用替身。
+
+### P1：记录可靠性
+
+- 禁止保存零个点或点数过少的路线。
+- 增加重复点和静止漂移过滤。
+- 增加记录阶段的速度、距离跳变过滤。
+- 根据真机数据决定是否加入平滑算法。
+- 处理定位过程中权限被撤回或高德 SDK 持续失败。
+
+### P1：生命周期与真机验证
+
+- 前台定位服务与后台记录。
+- 切后台、页面重建和进程被杀后的恢复策略。
+- 横竖屏、系统返回键和页面状态恢复。
+- GPS 不可用、网络断开和高德地图加载失败。
+- TalkBack、触控区域和户外强光可读性。
+- ESP32、电机驱动板和八个真实电机的完整连续测试。
+
+### P2：测试覆盖
+
+- 15秒预热和8米精度过滤测试。
+- 空路线保存保护测试。
+- JSON 保存、读取、删除和损坏文件测试。
+- RecordViewModel 与 SportViewModel 状态机测试。
+- Compose UI、权限、地图和生命周期测试。
+- BLE 扫描、连接、写命令和断连测试。
+
+### P3：工程整理
+
+- 更新仍然过期的 agent.md。
+- 清理或归档根目录下不参与构建的旧 UI 示例文件。
+- 固定高德依赖版本，避免使用 latest.integration。
+- 处理 Gradle 10 弃用警告。
+- 提交当前大量未提交和未跟踪文件，建立稳定版本节点。
+
+## 7. 已确认的产品决定
+
+- 只有记录页面保存路线。
+- 运动结束不保存，也不弹出保存窗口。
+- 心率和热量暂不考虑，相关状态字段不作为当前验收项。
+- Debug 虚拟 GPS 和手动电机控制不进入 Release 产品功能。
+- 当前路线文件格式暂不加入导航状态、电机状态等派生字段。
+
+## 8. 建议下一步
+
+建议按以下顺序继续：
+
+1. 增加空路线保存保护和记录过滤测试。
+2. 完成阶段5的真机、生命周期和无障碍验证。
+3. 定义“路线方向 - 人体方向 - 电机编号”的纯算法和测试数据。
+4. 将 BLE 控制器从 Debug 工具抽成可供正式运动流程使用的实现。
+5. 在自动振动之前先进行低强度、可立即停止的真机闭环测试。

@@ -10,6 +10,7 @@ import com.beltforblind.route.model.RoutePoint
 class AMapMapLocationSource(
     context: Context,
     private val onLocationError: (code: Int, message: String) -> Unit = { _, _ -> },
+    private val onLocation: (RoutePoint) -> Unit = {},
 ) : LocationSource {
     private val appContext = context.applicationContext
     private var locationClient: AMapLocationClient? = null
@@ -25,6 +26,7 @@ class AMapMapLocationSource(
 
         if (LocationSimulationProvider.isEnabled) {
             val listenerForSimulation: (RoutePoint) -> Unit = { point ->
+                onLocation(point)
                 mapLocationListener?.onLocationChanged(point.toAndroidLocation())
             }
             simulationListener = listenerForSimulation
@@ -55,6 +57,14 @@ class AMapMapLocationSource(
 
                     if (location.errorCode == 0) {
                         lastReportedErrorCode = null
+                        onLocation(
+                            RoutePoint(
+                                latitude = location.latitude,
+                                longitude = location.longitude,
+                                timestamp = if (location.time > 0L) location.time else System.currentTimeMillis(),
+                                accuracy = location.accuracy.takeIf { it > 0f },
+                            ),
+                        )
                         mapLocationListener?.onLocationChanged(location)
                     } else if (lastReportedErrorCode != location.errorCode) {
                         lastReportedErrorCode = location.errorCode

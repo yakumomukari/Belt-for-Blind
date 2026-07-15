@@ -1,0 +1,304 @@
+package com.beltforblind.ui.sport
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.CreationExtras
+import com.beltforblind.route.model.RoutePoint
+import com.beltforblind.route.model.RouteRecord
+import com.beltforblind.route.storage.JsonRouteStore
+import com.beltforblind.route.storage.RouteStore
+import com.beltforblind.route.tangent.RouteTangent
+import com.beltforblind.route.tangent.RouteTangentCalculator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class SportViewModel(
+    private val routeStore: RouteStore,
+) : ViewModel() {
+    private val mutableUiState = MutableStateFlow(SportUiState())
+    val uiState: StateFlow<SportUiState> = mutableUiState.asStateFlow()
+
+    private var timerJob: Job? = null
+    private var stageBeforePause = SportStage.RunningExpanded
+    private val metricsAccumulator = SportMetricsAccumulator()
+
+    init {
+        loadRoutes()
+    }
+
+    fun onEvent(event: SportUiEvent) {
+        when (event) {
+            SportUiEvent.OpenGpsStatus -> update { copy(isGpsStatusVisible = true) }
+            SportUiEvent.DismissGpsStatus -> update { copy(isGpsStatusVisible = false) }
+            SportUiEvent.OpenRoutePicker -> {
+                update { copy(isRoutePickerRequested = true) }
+                loadRoutes()
+            }
+            SportUiEvent.ReloadRoutes -> loadRoutes()
+            is SportUiEvent.SelectRoute -> update {
+                copy(
+                    selectedRoute = event.route,
+                    isRoutePickerRequested = false,
+                    routeProgress = 0f,
+                    routeTangent = null,
+                )
+            }
+            SportUiEvent.DismissRoutePicker -> update { copy(isRoutePickerRequested = false) }
+            SportUiEvent.StartRunning -> startRunning()
+            SportUiEvent.ExpandMetrics -> updateRunningStage(SportStage.RunningExpanded)
+            SportUiEvent.CollapseMetrics -> updateRunningStage(SportStage.RunningCollapsed)
+            SportUiEvent.PauseRunning -> pauseRunning()
+            SportUiEvent.ResumeRunning -> resumeRunning()
+            SportUiEvent.BeginHoldToStop -> beginHoldToStop()
+            SportUiEvent.CancelHoldToStop -> cancelHoldToStop()
+            SportUiEvent.ConfirmStop -> finishRunning()
+            SportUiEvent.ReturnToPreparing -> returnToPreparing()
+            SportUiEvent.RecenterMap -> update {
+                copy(
+                    isMapFollowingUser = true,
+                    recenterRequestId = recenterRequestId + 1,
+                )
+            }
+            SportUiEvent.MapMovedByUser -> update { copy(isMapFollowingUser = false) }
+            is SportUiEvent.LocationPermissionChanged -> onLocationPermissionChanged(event.granted)
+            is SportUiEvent.LocationUpdated -> onLocationUpdated(event.point)
+            is SportUiEvent.LocationFailed -> update {
+                copy(
+                    gpsState = GpsState(
+                        quality = GpsQuality.Unavailable,
+                        errorMessage = event.message,
+                    ),
+                    message = "定位失败（${event.code}）：${event.message}",
+                )
+            }
+            is SportUiEvent.BeltConnectionChanged -> update {
+                copy(beltConnectionState = event.state)
+            }
+            SportUiEvent.DismissMessage -> update { copy(message = null) }
+        }
+    }
+
+    private fun onLocationUpdated(point: RoutePoint) {
+        val state = mutableUiState.value
+        if (state.stage !in RUNNING_STAGES) {
+            update { copy(currentLocation = point, gpsState = GpsState.from(point)) }
+            return
+        }
+
+        val metrics = metricsAccumulator.add(point)
+        val candidate = findAcceptedRouteTangent(state.selectedRoute, point)
+            ?.takeIf { it.progress >= state.routeProgress.toDouble() }
+        update {
+            copy(
+                currentLocation = point,
+                gpsState = GpsState.from(point),
+                distanceMeters = metrics.distanceMeters,
+                paceSecondsPerKilometer = metrics.paceSecondsPerKilometer,
+                routeProgress = candidate?.progress?.toFloat() ?: routeProgress,
+                routeTangent = candidate ?: routeTangent,
+            )
+        }
+    }
+
+    private fun findAcceptedRouteTangent(
+        route: RouteRecord?,
+        point: RoutePoint,
+    ): RouteTangent? {
+        val accuracy = point.accuracy
+        if (route == null || accuracy == null || accuracy <= 0f || accuracy > MAX_PROGRESS_ACCURACY_METERS) {
+            return null
+        }
+        val tangent = RouteTangentCalculator.getTangent(route.points, point) ?: return null
+        val allowedDistance = maxOf(MIN_ROUTE_MATCH_DISTANCE_METERS, accuracy * 2.0)
+        return tangent.takeIf { it.distanceToRouteMeters <= allowedDistance }
+    }
+
+    private fun loadRoutes() {
+        update { copy(routesLoading = true, routeLoadError = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching(routeStore::loadAll)
+            }
+            result.onSuccess { routes ->
+                update {
+                    val refreshedSelection = selectedRoute?.let { selected ->
+                        routes.firstOrNull { it.id == selected.id }
+                    }
+                    copy(
+                        availableRoutes = routes,
+                        selectedRoute = refreshedSelection,
+                        routesLoading = false,
+                        routeLoadError = null,
+                    )
+                }
+            }.onFailure {
+                update {
+                    copy(
+                        routesLoading = false,
+                        routeLoadError = "路线读取失败，请重试",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun startRunning() {
+        val state = mutableUiState.value
+        if (!state.canStart) {
+            val reason = when {
+                state.selectedRoute == null -> "请先选择一条路线"
+                !state.locationPermissionGranted -> "需要定位权限才能开始运动"
+                else -> "正在等待有效定位"
+            }
+            update { copy(message = reason) }
+            return
+        }
+
+        metricsAccumulator.reset(state.currentLocation)
+        val initialTangent = state.currentLocation?.let { point ->
+            findAcceptedRouteTangent(state.selectedRoute, point)
+        }
+        update {
+            copy(
+                stage = SportStage.RunningCollapsed,
+                elapsedTimeSeconds = 0L,
+                distanceMeters = 0.0,
+                paceSecondsPerKilometer = null,
+                routeProgress = initialTangent?.progress?.toFloat() ?: 0f,
+                routeTangent = initialTangent,
+                isHoldingToStop = false,
+                message = null,
+            )
+        }
+        startTimer()
+    }
+
+    private fun updateRunningStage(stage: SportStage) {
+        if (mutableUiState.value.stage in RUNNING_STAGES) {
+            update { copy(stage = stage) }
+        }
+    }
+
+    private fun pauseRunning() {
+        val currentStage = mutableUiState.value.stage
+        if (currentStage !in RUNNING_STAGES) return
+        stageBeforePause = currentStage
+        timerJob?.cancel()
+        metricsAccumulator.pause()
+        update {
+            copy(
+                stage = SportStage.Paused,
+                paceSecondsPerKilometer = null,
+                isHoldingToStop = false,
+            )
+        }
+    }
+
+    private fun resumeRunning() {
+        if (mutableUiState.value.stage != SportStage.Paused) return
+        metricsAccumulator.resumeAt(mutableUiState.value.currentLocation)
+        update {
+            copy(
+                stage = stageBeforePause,
+                paceSecondsPerKilometer = null,
+                isHoldingToStop = false,
+            )
+        }
+        startTimer()
+    }
+
+    private fun finishRunning() {
+        if (mutableUiState.value.stage != SportStage.Paused) return
+        timerJob?.cancel()
+        update {
+            copy(
+                stage = SportStage.Finished,
+                isHoldingToStop = false,
+            )
+        }
+    }
+
+    private fun beginHoldToStop() {
+        if (mutableUiState.value.stage == SportStage.Paused) {
+            update { copy(isHoldingToStop = true) }
+        }
+    }
+
+    private fun cancelHoldToStop() {
+        if (mutableUiState.value.stage == SportStage.Paused) {
+            update { copy(isHoldingToStop = false) }
+        }
+    }
+
+    private fun returnToPreparing() {
+        if (mutableUiState.value.stage != SportStage.Finished) return
+        timerJob?.cancel()
+        metricsAccumulator.reset(null)
+        stageBeforePause = SportStage.RunningExpanded
+        update {
+            copy(
+                stage = SportStage.Preparing,
+                elapsedTimeSeconds = 0L,
+                distanceMeters = 0.0,
+                paceSecondsPerKilometer = null,
+                routeProgress = 0f,
+                routeTangent = null,
+                isHoldingToStop = false,
+                message = null,
+            )
+        }
+    }
+
+    private fun onLocationPermissionChanged(granted: Boolean) {
+        update {
+            copy(
+                locationPermissionGranted = granted,
+                gpsState = if (granted) gpsState else GpsState(),
+                currentLocation = if (granted) currentLocation else null,
+            )
+        }
+    }
+
+    private fun startTimer() {
+        timerJob?.cancel()
+        timerJob = viewModelScope.launch {
+            while (isActive && mutableUiState.value.stage in RUNNING_STAGES) {
+                delay(1_000L)
+                update { copy(elapsedTimeSeconds = elapsedTimeSeconds + 1L) }
+            }
+        }
+    }
+
+    private inline fun update(transform: SportUiState.() -> SportUiState) {
+        mutableUiState.value = mutableUiState.value.transform()
+    }
+
+    override fun onCleared() {
+        timerJob?.cancel()
+        super.onCleared()
+    }
+
+    companion object {
+        val RUNNING_STAGES = setOf(SportStage.RunningCollapsed, SportStage.RunningExpanded)
+        const val MAX_PROGRESS_ACCURACY_METERS = 25f
+        const val MIN_ROUTE_MATCH_DISTANCE_METERS = 30.0
+
+        fun factory(context: Context): ViewModelProvider.Factory {
+            return object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
+                    return SportViewModel(JsonRouteStore(context.applicationContext)) as T
+                }
+            }
+        }
+    }
+}

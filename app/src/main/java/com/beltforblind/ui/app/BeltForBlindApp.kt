@@ -65,7 +65,10 @@ fun BeltForBlindApp() {
         } else {
             when (selectedPage) {
                 AppPage.Record -> RecordScreen(modifier = Modifier.padding(padding))
-                AppPage.Sport -> SportScreen(modifier = Modifier.padding(padding))
+                AppPage.Sport -> SportScreen(
+                    onOpenRecordPage = { selectedPage = AppPage.Record },
+                    modifier = Modifier.padding(padding),
+                )
                 AppPage.Saved -> SavedRoutesScreen(modifier = Modifier.padding(padding))
             }
         }

@@ -6,6 +6,10 @@ import com.beltforblind.route.model.RoutePoint
 interface RouteRecorder {
     fun startRecord()
 
+    fun pauseRecord()
+
+    fun resumeRecord()
+
     fun stopRecord()
 
     fun getPointCount(): Int

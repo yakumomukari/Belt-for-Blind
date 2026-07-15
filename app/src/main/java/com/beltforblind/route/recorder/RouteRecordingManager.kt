@@ -8,6 +8,7 @@ import com.beltforblind.route.storage.RouteStore
 class RouteRecordingManager(
     private val locationDataSource: LocationDataSource,
     private val routeStore: RouteStore,
+    private val currentTimeMillis: () -> Long = { System.currentTimeMillis() },
 ) : RouteRecorder {
     private val rawPoints = mutableListOf<RoutePoint>()
     private var isRecording = false
@@ -27,46 +28,23 @@ class RouteRecordingManager(
         latestReceivedAccuracy = null
         latestPointAccepted = null
         discardedPointCount = 0
-        recordingStartedAt = System.currentTimeMillis()
-        isRecording = true
+        recordingStartedAt = currentTimeMillis()
+        startLocationUpdates()
+    }
 
-        try {
-            locationDataSource.start { point ->
-                if (!isRecording) {
-                    return@start
-                }
+    override fun pauseRecord() {
+        if (!isRecording) return
+        isRecording = false
+        locationDataSource.stop()
+    }
 
-                val accuracy = point.accuracy
-                latestReceivedAccuracy = accuracy
-                if (isInWarmup()) {
-                    latestPointAccepted = false
-                    discardedPointCount += 1
-                    return@start
-                }
-
-                if (accuracy == null || accuracy > MAX_ACCEPTED_ACCURACY_METERS) {
-                    latestPointAccepted = false
-                    discardedPointCount += 1
-                    return@start
-                }
-
-                rawPoints += point
-                latestAccuracy = accuracy
-                latestPointAccepted = true
-            }
-        } catch (error: SecurityException) {
-            isRecording = false
-            throw error
-        }
+    override fun resumeRecord() {
+        if (isRecording || recordingStartedAt == 0L) return
+        startLocationUpdates()
     }
 
     override fun stopRecord() {
-        if (!isRecording) {
-            return
-        }
-
-        isRecording = false
-        locationDataSource.stop()
+        pauseRecord()
     }
 
     override fun getPointCount(): Int {
@@ -94,7 +72,7 @@ class RouteRecordingManager(
             return 0L
         }
 
-        val elapsedMs = System.currentTimeMillis() - recordingStartedAt
+        val elapsedMs = currentTimeMillis() - recordingStartedAt
         val remainingMs = (WARMUP_DURATION_MS - elapsedMs).coerceAtLeast(0L)
         return (remainingMs + 999L) / 1000L
     }
@@ -106,7 +84,7 @@ class RouteRecordingManager(
     override fun saveRoute(name: String): RouteRecord {
         require(name.isNotBlank()) { "Route name must not be blank." }
 
-        val createdAt = System.currentTimeMillis()
+        val createdAt = currentTimeMillis()
         val route = RouteRecord(
             id = "route_$createdAt",
             name = name,
@@ -124,6 +102,38 @@ class RouteRecordingManager(
         return routeStore.delete(routeId)
     }
 
+    private fun startLocationUpdates() {
+        isRecording = true
+        try {
+            locationDataSource.start(::acceptPoint)
+        } catch (error: SecurityException) {
+            isRecording = false
+            throw error
+        }
+    }
+
+    private fun acceptPoint(point: RoutePoint) {
+        if (!isRecording) return
+
+        val accuracy = point.accuracy
+        latestReceivedAccuracy = accuracy
+        if (isInWarmup()) {
+            latestPointAccepted = false
+            discardedPointCount += 1
+            return
+        }
+
+        if (accuracy == null || accuracy > MAX_ACCEPTED_ACCURACY_METERS) {
+            latestPointAccepted = false
+            discardedPointCount += 1
+            return
+        }
+
+        rawPoints += point
+        latestAccuracy = accuracy
+        latestPointAccepted = true
+    }
+
     private companion object {
         const val MAX_ACCEPTED_ACCURACY_METERS = 8f
         const val WARMUP_DURATION_MS = 15_000L
@@ -131,6 +141,6 @@ class RouteRecordingManager(
 
     private fun isInWarmup(): Boolean {
         return recordingStartedAt > 0L &&
-            System.currentTimeMillis() - recordingStartedAt < WARMUP_DURATION_MS
+            currentTimeMillis() - recordingStartedAt < WARMUP_DURATION_MS
     }
 }
