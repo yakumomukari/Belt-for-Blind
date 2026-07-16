@@ -3,12 +3,15 @@ package com.beltforblind.ui.sport
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.GeomagneticField
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,11 +55,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,6 +79,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.beltforblind.motor.BleMotorController
+import com.beltforblind.motor.MotorConnectionStatus
+import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
+import com.beltforblind.navigation.heading.PhoneBackHeadingCalculator
+import com.beltforblind.navigation.heading.PhoneHeadingSample
+import com.beltforblind.navigation.heading.PhoneHeadingStatus
+import com.beltforblind.navigation.vibration.NavigationVibrationStatus
 import com.beltforblind.ui.theme.BeltColors
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -90,6 +103,21 @@ fun SportScreen(
     )
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val motorController = remember(context) { BleMotorController(context.applicationContext) }
+    val motorState by motorController.state.collectAsState()
+    var headingSample by remember { mutableStateOf(PhoneHeadingSample()) }
+    val headingProvider = remember(context) {
+        AndroidPhoneHeadingProvider(context.applicationContext) { sample ->
+            headingSample = sample
+        }
+    }
+    val requiredBeltPermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
@@ -98,6 +126,116 @@ fun SportScreen(
                 grants[Manifest.permission.ACCESS_FINE_LOCATION] == true,
             ),
         )
+    }
+    val beltPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (requiredBeltPermissions.all { grants[it] == true }) {
+            motorController.scanAndConnect()
+        } else {
+            viewModel.onEvent(
+                SportUiEvent.BeltConnectionChanged(BeltConnectionState.Error),
+            )
+        }
+    }
+    val requestBeltConnection = {
+        if (motorState.status !in setOf(
+                MotorConnectionStatus.Scanning,
+                MotorConnectionStatus.Connecting,
+                MotorConnectionStatus.Connected,
+            )
+        ) {
+            val missingPermissions = requiredBeltPermissions.filter { permission ->
+                ContextCompat.checkSelfPermission(context, permission) !=
+                    PackageManager.PERMISSION_GRANTED
+            }
+            if (missingPermissions.isEmpty()) {
+                motorController.scanAndConnect()
+            } else {
+                beltPermissionLauncher.launch(missingPermissions.toTypedArray())
+            }
+        }
+    }
+    val isActivelyRunning = state.stage in setOf(
+        SportStage.RunningCollapsed,
+        SportStage.RunningExpanded,
+    )
+
+    DisposableEffect(motorController, headingProvider) {
+        onDispose {
+            headingProvider.stop()
+            motorController.close()
+        }
+    }
+
+    DisposableEffect(headingProvider, isActivelyRunning) {
+        if (isActivelyRunning) headingProvider.start()
+        onDispose {
+            if (isActivelyRunning) headingProvider.stop()
+        }
+    }
+
+    LaunchedEffect(motorState.status) {
+        viewModel.onEvent(
+            SportUiEvent.BeltConnectionChanged(motorState.status.toBeltConnectionState()),
+        )
+    }
+
+    LaunchedEffect(isActivelyRunning) {
+        if (isActivelyRunning) requestBeltConnection()
+    }
+
+    LaunchedEffect(headingSample, state.currentLocation, isActivelyRunning) {
+        val magneticHeading = headingSample.headingDegrees
+        val point = state.currentLocation
+        if (
+            !isActivelyRunning ||
+            headingSample.status != PhoneHeadingStatus.Available ||
+            magneticHeading == null ||
+            point == null
+        ) {
+            viewModel.onEvent(SportUiEvent.HeadingUnavailable)
+            return@LaunchedEffect
+        }
+
+        val timestamp = point.timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
+        val declination = GeomagneticField(
+            point.latitude.toFloat(),
+            point.longitude.toFloat(),
+            0f,
+            timestamp,
+        ).declination.toDouble()
+        viewModel.onEvent(
+            SportUiEvent.HeadingUpdated(
+                PhoneBackHeadingCalculator.toTrueNorth(
+                    magneticHeadingDegrees = magneticHeading,
+                    declinationDegrees = declination,
+                ),
+            ),
+        )
+    }
+
+    val targetMotor = state.navigationVibrationDecision.motorNumber.takeIf {
+        isActivelyRunning &&
+            motorState.isConnected &&
+            state.navigationVibrationDecision.status == NavigationVibrationStatus.Guiding
+    }
+    LaunchedEffect(
+        targetMotor,
+        isActivelyRunning,
+        motorState.isConnected,
+        motorState.selectedMotor,
+        motorState.message,
+    ) {
+        if (!motorState.isConnected || targetMotor == motorState.selectedMotor) {
+            return@LaunchedEffect
+        }
+
+        if (targetMotor == null) {
+            motorController.stopMotor()
+        } else {
+            motorController.activateMotor(targetMotor)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -145,6 +283,7 @@ fun SportScreen(
             SportStage.Preparing -> PreparingSportContent(
                 state = state,
                 onEvent = viewModel::onEvent,
+                onBeltClick = requestBeltConnection,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(contentPadding),
@@ -155,6 +294,7 @@ fun SportScreen(
             -> RunningSportContent(
                 state = state,
                 onEvent = viewModel::onEvent,
+                onBeltClick = requestBeltConnection,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(contentPadding),
@@ -174,6 +314,7 @@ fun SportScreen(
 private fun PreparingSportContent(
     state: SportUiState,
     onEvent: (SportUiEvent) -> Unit,
+    onBeltClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
@@ -183,6 +324,7 @@ private fun PreparingSportContent(
             state = state,
             onGpsClick = { onEvent(SportUiEvent.OpenGpsStatus) },
             onGpsDismiss = { onEvent(SportUiEvent.DismissGpsStatus) },
+            onBeltClick = onBeltClick,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(16.dp),
@@ -256,6 +398,7 @@ private fun PreparingSportContent(
 private fun RunningSportContent(
     state: SportUiState,
     onEvent: (SportUiEvent) -> Unit,
+    onBeltClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val sheetState = rememberStandardBottomSheetState(
@@ -312,6 +455,7 @@ private fun RunningSportContent(
                 state = state,
                 onGpsClick = { onEvent(SportUiEvent.OpenGpsStatus) },
                 onGpsDismiss = { onEvent(SportUiEvent.DismissGpsStatus) },
+                onBeltClick = onBeltClick,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(16.dp),
@@ -352,6 +496,7 @@ private fun SportTopBar(
     state: SportUiState,
     onGpsClick: () -> Unit,
     onGpsDismiss: () -> Unit,
+    onBeltClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -388,24 +533,50 @@ private fun SportTopBar(
                 onClick = onGpsClick,
                 onDismiss = onGpsDismiss,
             )
-            if (state.stage != SportStage.Preparing) {
-                BeltStatusChip(state.beltConnectionState)
+            if (onBeltClick != null) {
+                BeltStatusChip(
+                    connectionState = state.beltConnectionState,
+                    motorNumber = state.navigationVibrationDecision.motorNumber,
+                    onClick = onBeltClick,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun BeltStatusChip(connectionState: BeltConnectionState) {
+private fun BeltStatusChip(
+    connectionState: BeltConnectionState,
+    motorNumber: Int?,
+    onClick: (() -> Unit)?,
+) {
     val connected = connectionState == BeltConnectionState.Connected
+    val label = if (connected && motorNumber != null) {
+        "${connectionState.label} · ${motorNumber}号"
+    } else {
+        connectionState.label
+    }
+    val canRetry = connectionState in setOf(
+        BeltConnectionState.Disconnected,
+        BeltConnectionState.Error,
+    )
     Surface(
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
         contentColor = if (connected) BeltColors.SportGreenDark else MaterialTheme.colorScheme.outline,
         shape = RoundedCornerShape(8.dp),
         shadowElevation = 2.dp,
-        modifier = Modifier.semantics {
-            contentDescription = connectionState.label
-        },
+        modifier = Modifier
+            .clickable(
+                enabled = canRetry && onClick != null,
+                onClick = { onClick?.invoke() },
+            )
+            .semantics {
+                contentDescription = if (canRetry) {
+                    "$label，点击重新连接"
+                } else {
+                    label
+                }
+            },
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -417,7 +588,7 @@ private fun BeltStatusChip(connectionState: BeltConnectionState) {
                 contentDescription = null,
                 modifier = Modifier.size(18.dp),
             )
-            Text(connectionState.label, style = MaterialTheme.typography.labelMedium)
+            Text(label, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -733,6 +904,17 @@ private fun Context.hasFineLocationPermission(): Boolean {
         this,
         Manifest.permission.ACCESS_FINE_LOCATION,
     ) == PackageManager.PERMISSION_GRANTED
+}
+
+private fun MotorConnectionStatus.toBeltConnectionState(): BeltConnectionState {
+    return when (this) {
+        MotorConnectionStatus.Disconnected -> BeltConnectionState.Disconnected
+        MotorConnectionStatus.Scanning,
+        MotorConnectionStatus.Connecting,
+        -> BeltConnectionState.Connecting
+        MotorConnectionStatus.Connected -> BeltConnectionState.Connected
+        MotorConnectionStatus.Error -> BeltConnectionState.Error
+    }
 }
 
 private fun GpsState.formattedAccuracy(): String {

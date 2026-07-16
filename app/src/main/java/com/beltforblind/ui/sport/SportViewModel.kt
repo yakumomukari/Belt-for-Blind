@@ -5,6 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.CreationExtras
+import com.beltforblind.navigation.vibration.NavigationVibrationDecision
+import com.beltforblind.navigation.vibration.NavigationVibrationPlanner
+import com.beltforblind.navigation.vibration.NavigationVibrationStatus
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.storage.JsonRouteStore
@@ -50,6 +53,7 @@ class SportViewModel(
                     isRoutePickerRequested = false,
                     routeProgress = 0f,
                     routeTangent = null,
+                    navigationVibrationDecision = NavigationVibrationDecision(),
                 )
             }
             SportUiEvent.DismissRoutePicker -> update { copy(isRoutePickerRequested = false) }
@@ -77,9 +81,18 @@ class SportViewModel(
                         quality = GpsQuality.Unavailable,
                         errorMessage = event.message,
                     ),
+                    navigationVibrationDecision = if (stage in RUNNING_STAGES) {
+                        NavigationVibrationDecision(
+                            status = NavigationVibrationStatus.UnreliableLocation,
+                        )
+                    } else {
+                        NavigationVibrationDecision()
+                    },
                     message = "定位失败（${event.code}）：${event.message}",
                 )
             }
+            is SportUiEvent.HeadingUpdated -> onHeadingUpdated(event.headingDegrees)
+            SportUiEvent.HeadingUnavailable -> onHeadingUnavailable()
             is SportUiEvent.BeltConnectionChanged -> update {
                 copy(beltConnectionState = event.state)
             }
@@ -95,8 +108,16 @@ class SportViewModel(
         }
 
         val metrics = metricsAccumulator.add(point)
+        val rawTangent = state.selectedRoute?.let { route ->
+            RouteTangentCalculator.getTangent(route.points, point)
+        }
         val candidate = findAcceptedRouteTangent(state.selectedRoute, point)
             ?.takeIf { it.progress >= state.routeProgress.toDouble() }
+        val vibrationDecision = NavigationVibrationPlanner.plan(
+            tangent = rawTangent,
+            headingDegrees = state.headingDegrees,
+            locationAccuracyMeters = point.accuracy,
+        )
         update {
             copy(
                 currentLocation = point,
@@ -105,8 +126,48 @@ class SportViewModel(
                 paceSecondsPerKilometer = metrics.paceSecondsPerKilometer,
                 routeProgress = candidate?.progress?.toFloat() ?: routeProgress,
                 routeTangent = candidate ?: routeTangent,
+                navigationVibrationDecision = vibrationDecision,
             )
         }
+    }
+
+    private fun onHeadingUpdated(headingDegrees: Double) {
+        if (!headingDegrees.isFinite()) {
+            onHeadingUnavailable()
+            return
+        }
+        val state = mutableUiState.value.copy(headingDegrees = headingDegrees.normalize360())
+        mutableUiState.value = state.copy(
+            navigationVibrationDecision = planNavigation(state),
+        )
+    }
+
+    private fun onHeadingUnavailable() {
+        val state = mutableUiState.value.copy(headingDegrees = null)
+        mutableUiState.value = state.copy(
+            navigationVibrationDecision = planNavigation(state),
+        )
+    }
+
+    private fun planNavigation(state: SportUiState): NavigationVibrationDecision {
+        if (state.stage !in RUNNING_STAGES) return NavigationVibrationDecision()
+        if (state.gpsState.quality == GpsQuality.Unavailable || state.gpsState.errorMessage != null) {
+            return NavigationVibrationDecision(
+                status = NavigationVibrationStatus.UnreliableLocation,
+            )
+        }
+        val point = state.currentLocation
+            ?: return NavigationVibrationDecision(
+                status = NavigationVibrationStatus.UnreliableLocation,
+            )
+        val tangent = state.selectedRoute?.let { route ->
+            RouteTangentCalculator.getTangent(route.points, point)
+        }
+        return NavigationVibrationPlanner.plan(
+            tangent = tangent,
+            headingDegrees = state.headingDegrees,
+            locationAccuracyMeters = point.accuracy,
+        )
     }
 
     private fun findAcceptedRouteTangent(
@@ -164,9 +225,19 @@ class SportViewModel(
         }
 
         metricsAccumulator.reset(state.currentLocation)
+        val rawTangent = state.currentLocation?.let { point ->
+            state.selectedRoute?.let { route ->
+                RouteTangentCalculator.getTangent(route.points, point)
+            }
+        }
         val initialTangent = state.currentLocation?.let { point ->
             findAcceptedRouteTangent(state.selectedRoute, point)
         }
+        val vibrationDecision = NavigationVibrationPlanner.plan(
+            tangent = rawTangent,
+            headingDegrees = state.headingDegrees,
+            locationAccuracyMeters = state.currentLocation?.accuracy,
+        )
         update {
             copy(
                 stage = SportStage.RunningCollapsed,
@@ -175,6 +246,7 @@ class SportViewModel(
                 paceSecondsPerKilometer = null,
                 routeProgress = initialTangent?.progress?.toFloat() ?: 0f,
                 routeTangent = initialTangent,
+                navigationVibrationDecision = vibrationDecision,
                 isHoldingToStop = false,
                 message = null,
             )
@@ -199,6 +271,7 @@ class SportViewModel(
                 stage = SportStage.Paused,
                 paceSecondsPerKilometer = null,
                 isHoldingToStop = false,
+                navigationVibrationDecision = NavigationVibrationDecision(),
             )
         }
     }
@@ -207,11 +280,12 @@ class SportViewModel(
         if (mutableUiState.value.stage != SportStage.Paused) return
         metricsAccumulator.resumeAt(mutableUiState.value.currentLocation)
         update {
-            copy(
+            val resumed = copy(
                 stage = stageBeforePause,
                 paceSecondsPerKilometer = null,
                 isHoldingToStop = false,
             )
+            resumed.copy(navigationVibrationDecision = planNavigation(resumed))
         }
         startTimer()
     }
@@ -223,6 +297,7 @@ class SportViewModel(
             copy(
                 stage = SportStage.Finished,
                 isHoldingToStop = false,
+                navigationVibrationDecision = NavigationVibrationDecision(),
             )
         }
     }
@@ -252,6 +327,7 @@ class SportViewModel(
                 paceSecondsPerKilometer = null,
                 routeProgress = 0f,
                 routeTangent = null,
+                navigationVibrationDecision = NavigationVibrationDecision(),
                 isHoldingToStop = false,
                 message = null,
             )
@@ -264,6 +340,15 @@ class SportViewModel(
                 locationPermissionGranted = granted,
                 gpsState = if (granted) gpsState else GpsState(),
                 currentLocation = if (granted) currentLocation else null,
+                navigationVibrationDecision = if (granted) {
+                    navigationVibrationDecision
+                } else if (stage in RUNNING_STAGES) {
+                    NavigationVibrationDecision(
+                        status = NavigationVibrationStatus.UnreliableLocation,
+                    )
+                } else {
+                    NavigationVibrationDecision()
+                },
             )
         }
     }
@@ -281,6 +366,8 @@ class SportViewModel(
     private inline fun update(transform: SportUiState.() -> SportUiState) {
         mutableUiState.value = mutableUiState.value.transform()
     }
+
+    private fun Double.normalize360(): Double = ((this % 360.0) + 360.0) % 360.0
 
     override fun onCleared() {
         timerJob?.cancel()

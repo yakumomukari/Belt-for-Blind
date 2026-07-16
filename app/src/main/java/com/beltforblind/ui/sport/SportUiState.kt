@@ -3,6 +3,7 @@ package com.beltforblind.ui.sport
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.tangent.RouteTangent
+import com.beltforblind.navigation.vibration.NavigationVibrationDecision
 
 enum class SportStage {
     Preparing,
@@ -55,6 +56,8 @@ data class SportUiState(
     val currentLocation: RoutePoint? = null,
     val routeProgress: Float = 0f,
     val routeTangent: RouteTangent? = null,
+    val headingDegrees: Double? = null,
+    val navigationVibrationDecision: NavigationVibrationDecision = NavigationVibrationDecision(),
     val elapsedTimeSeconds: Long = 0L,
     val distanceMeters: Double = 0.0,
     val paceSecondsPerKilometer: Long? = null,
@@ -96,6 +99,8 @@ sealed interface SportUiEvent {
     data class LocationPermissionChanged(val granted: Boolean) : SportUiEvent
     data class LocationUpdated(val point: RoutePoint) : SportUiEvent
     data class LocationFailed(val code: Int, val message: String) : SportUiEvent
+    data class HeadingUpdated(val headingDegrees: Double) : SportUiEvent
+    data object HeadingUnavailable : SportUiEvent
     data class BeltConnectionChanged(val state: BeltConnectionState) : SportUiEvent
     data object DismissMessage : SportUiEvent
 }

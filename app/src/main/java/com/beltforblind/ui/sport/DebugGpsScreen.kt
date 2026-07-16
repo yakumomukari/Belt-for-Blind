@@ -24,6 +24,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,8 +47,14 @@ import androidx.core.content.ContextCompat
 import com.beltforblind.motor.BleMotorController
 import com.beltforblind.motor.MotorConnectionStatus
 import com.beltforblind.motor.MotorControlGateway
+import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
+import com.beltforblind.navigation.heading.PhoneHeadingAccuracy
+import com.beltforblind.navigation.heading.PhoneHeadingSample
+import com.beltforblind.navigation.heading.PhoneHeadingStatus
+import com.beltforblind.navigation.vibration.NavigationVibrationPlanner
 import com.beltforblind.route.location.LocationSimulationProvider
 import com.beltforblind.route.location.SimulationScenario
+import com.beltforblind.route.tangent.RouteTangent
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -146,6 +153,21 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     val context = LocalContext.current
     val state by controller.state.collectAsState()
     var permissionMessage by remember { mutableStateOf<String?>(null) }
+    var northTestEnabled by remember { mutableStateOf(false) }
+    var headingSample by remember { mutableStateOf(PhoneHeadingSample()) }
+    var lastAutomaticMotor by remember { mutableStateOf<Int?>(null) }
+    val headingProvider = remember(context) {
+        AndroidPhoneHeadingProvider(context.applicationContext) { sample ->
+            headingSample = sample
+        }
+    }
+    val northDecision = headingSample.headingDegrees?.let { heading ->
+        NavigationVibrationPlanner.plan(
+            tangent = NORTH_ROUTE_TANGENT,
+            headingDegrees = heading,
+            locationAccuracyMeters = NORTH_TEST_ACCURACY_METERS,
+        )
+    }
     val requiredPermissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
@@ -173,6 +195,41 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
         } else {
             permissionLauncher.launch(missingPermissions.toTypedArray())
         }
+    }
+
+    DisposableEffect(headingProvider, northTestEnabled) {
+        if (northTestEnabled) headingProvider.start()
+        onDispose {
+            if (northTestEnabled) headingProvider.stop()
+        }
+    }
+
+    LaunchedEffect(state.isConnected) {
+        if (!state.isConnected && northTestEnabled) {
+            northTestEnabled = false
+            lastAutomaticMotor = null
+        }
+    }
+
+    LaunchedEffect(
+        northTestEnabled,
+        state.isConnected,
+        headingSample.status,
+        northDecision?.motorNumber,
+    ) {
+        if (!northTestEnabled || !state.isConnected) {
+            lastAutomaticMotor = null
+            return@LaunchedEffect
+        }
+
+        val targetMotor = northDecision?.motorNumber
+        if (targetMotor == lastAutomaticMotor) return@LaunchedEffect
+        if (targetMotor == null) {
+            controller.stopMotor()
+        } else {
+            controller.activateMotor(targetMotor)
+        }
+        lastAutomaticMotor = targetMotor
     }
 
     Text("腰带电机测试", style = MaterialTheme.typography.titleLarge)
@@ -208,9 +265,47 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
         }
     }
 
+    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+    Text("正北路线自动测试", style = MaterialTheme.typography.titleLarge)
+    Text("固定路线方向为北方。手机需竖直放在人体正前方，屏幕朝向身体、背面朝外。")
+    Text(
+        text = "朝向状态：${headingSample.status.displayName()}",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    headingSample.headingDegrees?.let { heading ->
+        Text("人体朝向：%.1f°（磁北基准）".format(heading))
+        Text("传感器精度：${headingSample.accuracy.displayName()}")
+    }
+    Text(
+        text = northDecision?.motorNumber?.let { motor ->
+            "正北引导建议：$motor 号电机"
+        } ?: "正北引导建议：停止",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    Text("预期：面北→1号，面东→7号，面南→5号，面西→3号。")
+    Button(
+        onClick = {
+            if (northTestEnabled) {
+                northTestEnabled = false
+                lastAutomaticMotor = null
+                controller.stopMotor()
+            } else {
+                controller.stopMotor()
+                lastAutomaticMotor = null
+                northTestEnabled = true
+            }
+        },
+        enabled = state.isConnected,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(if (northTestEnabled) "停止正北自动测试" else "启动正北自动测试")
+    }
+
+    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+    Text("手动轮盘", style = MaterialTheme.typography.titleLarge)
     MotorWheel(
         selectedMotor = state.selectedMotor,
-        enabled = state.isConnected,
+        enabled = state.isConnected && !northTestEnabled,
         onMotorSelected = controller::activateMotor,
         onStop = controller::stopMotor,
     )
@@ -354,6 +449,25 @@ private fun MotorConnectionStatus.displayName(): String {
     }
 }
 
+private fun PhoneHeadingStatus.displayName(): String {
+    return when (this) {
+        PhoneHeadingStatus.Stopped -> "未启动"
+        PhoneHeadingStatus.Available -> "可用"
+        PhoneHeadingStatus.SensorUnavailable -> "手机不支持旋转矢量传感器"
+        PhoneHeadingStatus.Unreliable -> "传感器不可靠，电机已停止"
+        PhoneHeadingStatus.InvalidOrientation -> "手机姿态不符合要求，电机已停止"
+    }
+}
+
+private fun PhoneHeadingAccuracy.displayName(): String {
+    return when (this) {
+        PhoneHeadingAccuracy.Unknown -> "未知"
+        PhoneHeadingAccuracy.Low -> "低"
+        PhoneHeadingAccuracy.Medium -> "中"
+        PhoneHeadingAccuracy.High -> "高"
+    }
+}
+
 private fun SimulationScenario.displayName(): String {
     return when (this) {
         SimulationScenario.Straight -> "直线路线"
@@ -371,3 +485,14 @@ private fun SimulationScenario.description(): String {
 }
 
 private const val STOP_RADIUS_RATIO = 0.27f
+private const val NORTH_TEST_ACCURACY_METERS = 3f
+
+private val NORTH_ROUTE_TANGENT = RouteTangent(
+    segmentStartIndex = 0,
+    segmentEndIndex = 1,
+    projectionRatio = 0.5,
+    tangentBearingDegrees = 0.0,
+    distanceToRouteMeters = 0.0,
+    alongRouteDistanceMeters = 50.0,
+    totalRouteDistanceMeters = 100.0,
+)
