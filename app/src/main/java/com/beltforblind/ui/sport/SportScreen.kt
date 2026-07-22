@@ -10,12 +10,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,11 +26,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.DirectionsRun
 import androidx.compose.material.icons.rounded.Bluetooth
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.GpsFixed
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.Pause
@@ -40,12 +46,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarHost
@@ -75,6 +78,7 @@ import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -86,6 +90,10 @@ import com.beltforblind.navigation.heading.PhoneBackHeadingCalculator
 import com.beltforblind.navigation.heading.PhoneHeadingSample
 import com.beltforblind.navigation.heading.PhoneHeadingStatus
 import com.beltforblind.navigation.vibration.NavigationVibrationStatus
+import com.beltforblind.ui.components.AppHeaderCard
+import com.beltforblind.ui.components.StatusChip
+import com.beltforblind.ui.components.StatusType
+import com.beltforblind.ui.components.pressScale
 import com.beltforblind.ui.theme.BeltColors
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -260,6 +268,7 @@ fun SportScreen(
 
     Scaffold(
         modifier = modifier,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { contentPadding ->
         if (state.isRoutePickerRequested) {
@@ -327,67 +336,117 @@ private fun PreparingSportContent(
             onBeltClick = onBeltClick,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(16.dp),
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         )
 
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 24.dp),
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SportRouteSelectionCard(
+                state = state,
+                onClick = { onEvent(SportUiEvent.OpenRoutePicker) },
+            )
+            RoundStartSportButton(
+                enabled = state.canStart,
+                onClick = { onEvent(SportUiEvent.StartRunning) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SportRouteSelectionCard(
+    state: SportUiState,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = state.selectedRoute?.let { "已选择路线，${it.name}" }
+                    ?: "选择跑步路线"
+                role = Role.Button
+            },
+        color = BeltColors.Surface,
+        shape = RoundedCornerShape(20.dp),
+        shadowElevation = 2.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Surface(
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                shape = RoundedCornerShape(8.dp),
-                shadowElevation = 3.dp,
+                shape = RoundedCornerShape(12.dp),
+                color = BeltColors.PurpleContainer,
+                contentColor = BeltColors.PrimaryPurple,
             ) {
-                OutlinedButton(
-                    onClick = { onEvent(SportUiEvent.OpenRoutePicker) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .semantics {
-                            contentDescription = state.selectedRoute?.let { "已选择路线，${it.name}" }
-                                ?: "选择跑步路线"
-                        },
-                ) {
-                    Icon(Icons.Rounded.Route, contentDescription = null)
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text(state.selectedRoute?.name ?: "选择路线")
-                }
-            }
-
-            Text(
-                text = state.startRequirementText(),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { contentDescription = state.startRequirementText() },
-            )
-
-            Button(
-                onClick = { onEvent(SportUiEvent.StartRunning) },
-                enabled = state.canStart,
-                modifier = Modifier
-                    .size(104.dp)
-                    .semantics {
-                        contentDescription = if (state.canStart) {
-                            "开始户外跑步"
-                        } else {
-                            "开始按钮不可用，需要路线、定位权限和有效定位"
-                        }
-                    },
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
-            ) {
-                Text(
-                    text = "GO",
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
+                Icon(
+                    Icons.Rounded.Route,
+                    contentDescription = null,
+                    modifier = Modifier.padding(10.dp).size(22.dp),
                 )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = state.selectedRoute?.name ?: "尚未选择路线",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = state.selectedRoute?.let {
+                        "路线长度 ${it.totalDistanceMeters().formatDistance()}"
+                    } ?: "点击选择一条已保存路线",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BeltColors.TextSecondary,
+                )
+            }
+            Icon(
+                Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = BeltColors.PrimaryPurple,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RoundStartSportButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        shape = CircleShape,
+        color = BeltColors.PurpleContainer.copy(alpha = 0.82f),
+        modifier = Modifier.pressScale(interactionSource, pressedScale = 0.93f),
+    ) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            interactionSource = interactionSource,
+            modifier = Modifier.padding(6.dp).size(92.dp),
+            contentPadding = PaddingValues(0.dp),
+            shape = CircleShape,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = BeltColors.PrimaryPurple,
+                contentColor = Color.White,
+                disabledContainerColor = BeltColors.Disabled,
+            ),
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("开始", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("GO", style = MaterialTheme.typography.labelMedium)
             }
         }
     }
@@ -436,11 +495,11 @@ private fun RunningSportContent(
     BottomSheetScaffold(
         modifier = modifier,
         scaffoldState = scaffoldState,
-        sheetPeekHeight = if (state.stage == SportStage.Paused) 248.dp else 132.dp,
-        sheetShape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
-        sheetContainerColor = BeltColors.SportPanel,
-        sheetContentColor = BeltColors.SportPanelText,
-        sheetDragHandle = { BottomSheetDefaults.DragHandle(color = BeltColors.SportPanelLabel) },
+        sheetPeekHeight = if (state.stage == SportStage.Paused) 228.dp else 188.dp,
+        sheetShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        sheetContainerColor = BeltColors.Surface,
+        sheetContentColor = BeltColors.TextPrimary,
+        sheetDragHandle = { BottomSheetDefaults.DragHandle(color = BeltColors.Disabled) },
         sheetContent = {
             if (state.stage == SportStage.Paused) {
                 PausedControls(state = state, onEvent = onEvent)
@@ -458,14 +517,69 @@ private fun RunningSportContent(
                 onBeltClick = onBeltClick,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(16.dp),
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             )
+            if (state.stage != SportStage.Paused) {
+                RunningRouteStatusCard(
+                    state = state,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 200.dp),
+                )
+            }
             RecenterButton(
                 onClick = { onEvent(SportUiEvent.RecenterMap) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 148.dp),
+                    .padding(end = 16.dp, bottom = 284.dp),
             )
+        }
+    }
+}
+
+@Composable
+private fun RunningRouteStatusCard(
+    state: SportUiState,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = BeltColors.Surface,
+        shadowElevation = 2.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = BeltColors.PurpleContainer,
+                contentColor = BeltColors.PrimaryPurple,
+            ) {
+                Icon(
+                    Icons.Rounded.Route,
+                    contentDescription = null,
+                    modifier = Modifier.padding(9.dp).size(22.dp),
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = state.selectedRoute?.name ?: "路线未加载",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "路线引导中 · ${(state.routeProgress * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BeltColors.PrimaryPurple,
+                )
+            }
         }
     }
 }
@@ -496,50 +610,27 @@ private fun SportTopBar(
     state: SportUiState,
     onGpsClick: () -> Unit,
     onGpsDismiss: () -> Unit,
-    onBeltClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onBeltClick: (() -> Unit)? = null,
 ) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top,
+    AppHeaderCard(
+        title = "户外跑步",
+        subtitle = "安全陪伴 · 科学运动",
+        leadingIcon = Icons.AutoMirrored.Rounded.DirectionsRun,
+        modifier = modifier,
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            shape = RoundedCornerShape(8.dp),
-            shadowElevation = 2.dp,
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(Icons.AutoMirrored.Rounded.DirectionsRun, contentDescription = null)
-                Text(
-                    text = "户外跑步",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-        }
-
-        Column(
-            horizontalAlignment = Alignment.End,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            GpsStatusMenu(
-                gpsState = state.gpsState,
-                expanded = state.isGpsStatusVisible,
-                onClick = onGpsClick,
-                onDismiss = onGpsDismiss,
+        GpsStatusMenu(
+            gpsState = state.gpsState,
+            expanded = state.isGpsStatusVisible,
+            onClick = onGpsClick,
+            onDismiss = onGpsDismiss,
+        )
+        if (onBeltClick != null) {
+            BeltStatusChip(
+                connectionState = state.beltConnectionState,
+                motorNumber = state.navigationVibrationDecision.motorNumber,
+                onClick = onBeltClick,
             )
-            if (onBeltClick != null) {
-                BeltStatusChip(
-                    connectionState = state.beltConnectionState,
-                    motorNumber = state.navigationVibrationDecision.motorNumber,
-                    onClick = onBeltClick,
-                )
-            }
         }
     }
 }
@@ -560,37 +651,18 @@ private fun BeltStatusChip(
         BeltConnectionState.Disconnected,
         BeltConnectionState.Error,
     )
-    Surface(
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-        contentColor = if (connected) BeltColors.SportGreenDark else MaterialTheme.colorScheme.outline,
-        shape = RoundedCornerShape(8.dp),
-        shadowElevation = 2.dp,
-        modifier = Modifier
-            .clickable(
-                enabled = canRetry && onClick != null,
-                onClick = { onClick?.invoke() },
-            )
-            .semantics {
-                contentDescription = if (canRetry) {
-                    "$label，点击重新连接"
-                } else {
-                    label
-                }
-            },
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Bluetooth,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
-            Text(label, style = MaterialTheme.typography.labelMedium)
-        }
-    }
+    StatusChip(
+        icon = Icons.Rounded.Bluetooth,
+        text = label,
+        type = when (connectionState) {
+            BeltConnectionState.Connected -> StatusType.Success
+            BeltConnectionState.Connecting -> StatusType.Warning
+            BeltConnectionState.Disconnected -> StatusType.Neutral
+            BeltConnectionState.Error -> StatusType.Error
+        },
+        onClick = if (canRetry) onClick else null,
+        contentDescription = if (canRetry) "$label，点击重新连接" else label,
+    )
 }
 
 @Composable
@@ -600,30 +672,26 @@ private fun GpsStatusMenu(
     onClick: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val statusColor = when (gpsState.quality) {
-        GpsQuality.Good -> BeltColors.SportGreenDark
-        GpsQuality.Fair -> BeltColors.GpsWarning
-        GpsQuality.Poor -> BeltColors.StopRed
-        GpsQuality.Unavailable -> MaterialTheme.colorScheme.outline
+    val statusType = when (gpsState.quality) {
+        GpsQuality.Good -> StatusType.Success
+        GpsQuality.Fair -> StatusType.Warning
+        GpsQuality.Poor -> StatusType.Error
+        GpsQuality.Unavailable -> StatusType.Neutral
+    }
+    val statusColor = when (statusType) {
+        StatusType.Success -> BeltColors.Success
+        StatusType.Warning -> BeltColors.Warning
+        StatusType.Error -> BeltColors.Error
+        else -> BeltColors.TextSecondary
     }
     Box {
-        FilledTonalButton(
+        StatusChip(
+            icon = Icons.Rounded.GpsFixed,
+            text = "GPS ${gpsState.quality.label}",
+            type = statusType,
             onClick = onClick,
-            modifier = Modifier
-                .height(52.dp)
-                .semantics {
-                    contentDescription = "GPS ${gpsState.quality.label}，${gpsState.formattedAccuracy()}"
-                },
-            colors = ButtonDefaults.filledTonalButtonColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                contentColor = statusColor,
-            ),
-            shape = RoundedCornerShape(8.dp),
-        ) {
-            Icon(Icons.Rounded.GpsFixed, contentDescription = null)
-            Spacer(modifier = Modifier.size(6.dp))
-            Text(gpsState.quality.label, fontWeight = FontWeight.Bold)
-        }
+            contentDescription = "GPS ${gpsState.quality.label}，${gpsState.formattedAccuracy()}，点击查看详情",
+        )
         androidx.compose.material3.DropdownMenu(
             expanded = expanded,
             onDismissRequest = onDismiss,
@@ -648,56 +716,32 @@ private fun RunningMetrics(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            MetricValue("总距离", state.distanceMeters.formatDistance())
-            MetricValue("总时长", state.elapsedTimeSeconds.formatDuration())
-            MetricValue("实时配速", state.paceSecondsPerKilometer.formatPace())
-        }
-        Text(
-            text = state.distanceMeters.formatDistance(),
-            fontSize = 48.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("路线完成", color = BeltColors.SportPanelLabel)
-                Text("${(state.routeProgress * 100).toInt()}%", fontWeight = FontWeight.Bold)
-            }
-            LinearProgressIndicator(
-                progress = { state.routeProgress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(10.dp)
-                    .semantics {
-                        contentDescription = "路线已完成 ${(state.routeProgress * 100).toInt()}%"
-                    },
-                color = BeltColors.SportGreen,
-                trackColor = BeltColors.SportPanelSecondary,
-            )
+            MetricValue("距离", state.distanceMeters.formatDistance())
+            MetricValue("用时", state.elapsedTimeSeconds.formatDuration())
+            MetricValue("平均速度", state.averageSpeedText())
         }
         Button(
             onClick = { onEvent(SportUiEvent.PauseRunning) },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(72.dp),
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White,
-                contentColor = BeltColors.SportPanel,
+                containerColor = BeltColors.PrimaryPurple,
+                contentColor = Color.White,
             ),
         ) {
             Icon(Icons.Rounded.Pause, contentDescription = null)
             Spacer(modifier = Modifier.size(8.dp))
-            Text("暂停", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("暂停", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -710,32 +754,33 @@ private fun PausedControls(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("运动已暂停", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("运动已暂停", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Text(
             text = "${state.distanceMeters.formatDistance()}  ·  ${state.elapsedTimeSeconds.formatDuration()}",
-            color = BeltColors.SportPanelLabel,
+            color = BeltColors.TextSecondary,
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             HoldToStopButton(
                 holding = state.isHoldingToStop,
                 onEvent = onEvent,
                 modifier = Modifier
                     .weight(1f)
-                    .height(80.dp),
+                    .height(60.dp),
             )
             Button(
                 onClick = { onEvent(SportUiEvent.ResumeRunning) },
                 modifier = Modifier
                     .weight(1f)
-                    .height(80.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
+                    .height(60.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.PrimaryPurple),
             ) {
                 Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                 Spacer(modifier = Modifier.size(6.dp))
@@ -794,7 +839,7 @@ private fun HoldToStopButton(
                     },
                 )
             },
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(16.dp),
         color = BeltColors.StopRed.copy(alpha = 0.12f),
         contentColor = BeltColors.StopRed,
         border = BorderStroke(2.dp, BeltColors.StopRed),
@@ -830,8 +875,13 @@ private fun HoldToStopButton(
 @Composable
 private fun MetricValue(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = value, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text(text = label, color = BeltColors.SportPanelLabel, fontSize = 13.sp)
+        Crossfade(
+            targetState = value,
+            animationSpec = tween(180),
+        ) { animatedValue ->
+            Text(text = animatedValue, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(text = label, color = BeltColors.TextSecondary, fontSize = 12.sp)
     }
 }
 
@@ -840,14 +890,16 @@ private fun RecenterButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Surface(
-        modifier = modifier,
+        modifier = modifier.pressScale(interactionSource),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 4.dp,
     ) {
         IconButton(
             onClick = onClick,
+            interactionSource = interactionSource,
             modifier = Modifier
                 .size(56.dp)
                 .semantics { contentDescription = "重新定位并恢复地图跟随" },
@@ -869,15 +921,15 @@ private fun FinishedSportContent(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth(),
-            color = BeltColors.SportPanel,
-            contentColor = BeltColors.SportPanelText,
-            shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+            color = BeltColors.Surface,
+            contentColor = BeltColors.TextPrimary,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
                     "运动已结束",
@@ -890,7 +942,8 @@ private fun FinishedSportContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(64.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BeltColors.PrimaryPurple),
                 ) {
                     Text("返回运动首页", fontWeight = FontWeight.Bold)
                 }
@@ -931,7 +984,20 @@ private fun GpsState.signalBars(): String {
 }
 
 private fun Double.formatDistance(): String {
-    return "%.2f km".format(Locale.getDefault(), this / 1_000.0)
+    return if (this < 1_000.0) {
+        "%.0f m".format(Locale.getDefault(), this)
+    } else {
+        "%.2f km".format(Locale.getDefault(), this / 1_000.0)
+    }
+}
+
+private fun SportUiState.averageSpeedText(): String {
+    val speedKmh = if (elapsedTimeSeconds <= 0L) {
+        0.0
+    } else {
+        distanceMeters / elapsedTimeSeconds * 3.6
+    }
+    return "%.1f km/h".format(Locale.getDefault(), speedKmh)
 }
 
 private fun Long.formatDuration(): String {
@@ -939,11 +1005,6 @@ private fun Long.formatDuration(): String {
     val minutes = this % 3_600 / 60
     val seconds = this % 60
     return "%02d:%02d:%02d".format(Locale.getDefault(), hours, minutes, seconds)
-}
-
-private fun Long?.formatPace(): String {
-    if (this == null) return "--"
-    return "%d'%02d\"".format(Locale.getDefault(), this / 60, this % 60)
 }
 
 private fun SportUiState.startRequirementText(): String {

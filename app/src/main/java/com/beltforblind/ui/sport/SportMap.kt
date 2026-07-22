@@ -13,7 +13,6 @@ import com.amap.api.maps2d.CameraUpdateFactory
 import com.amap.api.maps2d.MapView
 import com.amap.api.maps2d.model.BitmapDescriptorFactory
 import com.amap.api.maps2d.model.LatLng
-import com.amap.api.maps2d.model.LatLngBounds
 import com.amap.api.maps2d.model.Marker
 import com.amap.api.maps2d.model.MarkerOptions
 import com.amap.api.maps2d.model.MyLocationStyle
@@ -52,7 +51,9 @@ internal fun SportMap(
         MapView(context).apply {
             onCreate(null)
             map.uiSettings.isZoomControlsEnabled = false
+            map.uiSettings.isZoomGesturesEnabled = false
             map.uiSettings.isMyLocationButtonEnabled = false
+            map.moveCamera(CameraUpdateFactory.zoomTo(FIXED_MAP_ZOOM))
             map.setLocationSource(locationSource)
             map.setOnMapTouchListener { event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
@@ -79,9 +80,13 @@ internal fun SportMap(
             if (view.map.isMyLocationEnabled != locationPermissionGranted) {
                 view.map.isMyLocationEnabled = locationPermissionGranted
             }
-            controller.updateRoute(route)
+            controller.updateRoute(
+                route = route,
+                focusOnRouteStart = currentLocation == null,
+            )
             controller.updateCompletedRoute(route, routeTangent)
             controller.updateFollowMode(followUser)
+            controller.centerOnInitialLocation(currentLocation)
             controller.handleRecenter(recenterRequestId, currentLocation)
         },
         modifier = modifier,
@@ -97,10 +102,14 @@ private class SportMapController(
     private var startMarker: Marker? = null
     private var endMarker: Marker? = null
     private var followMode: Boolean? = null
+    private var initialLocationCentered = false
     private var handledRecenterRequestId = 0L
     private var renderedProgressSignature: String? = null
 
-    fun updateRoute(route: RouteRecord?) {
+    fun updateRoute(
+        route: RouteRecord?,
+        focusOnRouteStart: Boolean,
+    ) {
         val signature = route?.let { "${it.id}:${it.points.size}:${it.points.lastOrNull()?.timestamp}" }
         if (signature == renderedRouteSignature) return
 
@@ -138,16 +147,11 @@ private class SportMapController(
                 .title("路线终点")
                 .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)),
         )
-        mapView.post {
-            if (points.size == 1) {
+        if (focusOnRouteStart) {
+            mapView.post {
                 mapView.map.animateCamera(
-                    CameraUpdateFactory.newLatLngZoom(points.first(), MIN_RECENTER_ZOOM),
+                    CameraUpdateFactory.newLatLngZoom(points.first(), FIXED_MAP_ZOOM),
                 )
-            } else {
-                val bounds = LatLngBounds.Builder().also { builder ->
-                    points.forEach(builder::include)
-                }.build()
-                mapView.map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, ROUTE_PADDING_PX))
             }
         }
     }
@@ -210,25 +214,35 @@ private class SportMapController(
         )
     }
 
-    fun handleRecenter(requestId: Long, location: RoutePoint?) {
-        if (requestId == handledRecenterRequestId || location == null) return
-        handledRecenterRequestId = requestId
-        val zoom = mapView.map.cameraPosition.zoom.coerceAtLeast(MIN_RECENTER_ZOOM)
+    fun centerOnInitialLocation(location: RoutePoint?) {
+        if (initialLocationCentered || location == null) return
+        initialLocationCentered = true
         mapView.map.animateCamera(
             CameraUpdateFactory.newLatLngZoom(
                 LatLng(location.latitude, location.longitude),
-                zoom,
+                FIXED_MAP_ZOOM,
+            ),
+        )
+    }
+
+    fun handleRecenter(requestId: Long, location: RoutePoint?) {
+        if (requestId == handledRecenterRequestId || location == null) return
+        handledRecenterRequestId = requestId
+        mapView.map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(
+                LatLng(location.latitude, location.longitude),
+                FIXED_MAP_ZOOM,
             ),
         )
     }
 
     private companion object {
         const val LOCATION_INTERVAL_MS = 3_000L
-        const val MIN_RECENTER_ZOOM = 18f
-        const val ROUTE_PADDING_PX = 72
         val REMAINING_ROUTE_COLOR = android.graphics.Color.argb(170, 110, 117, 108)
         val COMPLETED_ROUTE_COLOR = android.graphics.Color.rgb(35, 122, 56)
         val LOCATION_STROKE_COLOR = android.graphics.Color.rgb(21, 101, 192)
         val LOCATION_RADIUS_COLOR = android.graphics.Color.argb(40, 21, 101, 192)
     }
 }
+
+private const val FIXED_MAP_ZOOM = 20f

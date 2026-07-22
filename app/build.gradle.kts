@@ -28,6 +28,16 @@ android {
         manifestPlaceholders["AMAP_API_KEY"] = localProperties.getProperty("AMAP_API_KEY", "")
     }
 
+    buildTypes {
+        create("beta") {
+            initWith(getByName("release"))
+            versionNameSuffix = "-beta"
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
+            matchingFallbacks += listOf("release")
+        }
+    }
+
     buildFeatures {
         compose = true
     }

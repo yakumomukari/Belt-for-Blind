@@ -8,13 +8,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,14 +24,26 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.material.icons.rounded.GpsFixed
+import androidx.compose.material.icons.rounded.Map
+import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material.icons.rounded.Navigation
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -49,6 +63,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
@@ -58,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -72,6 +89,7 @@ import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -89,6 +107,10 @@ import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.tangent.RouteTangent
 import com.beltforblind.route.tangent.RouteTangentCalculator
+import com.beltforblind.ui.components.AppHeaderCard
+import com.beltforblind.ui.components.StatusChip
+import com.beltforblind.ui.components.StatusType
+import com.beltforblind.ui.components.pressScale
 import com.beltforblind.ui.theme.BeltColors
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -122,6 +144,10 @@ fun RecordScreen(modifier: Modifier = Modifier) {
     var locationPermissionGranted by remember { mutableStateOf(context.hasLocationPermission()) }
     var startRecordingAfterPermission by remember { mutableStateOf(false) }
     var mapLocationError by remember { mutableStateOf<String?>(null) }
+    var mapLocationAccuracy by remember { mutableStateOf<Float?>(null) }
+    var mapLocationTimestamp by remember { mutableStateOf<Long?>(null) }
+    var showGpsDetails by remember { mutableStateOf(false) }
+    var mapRecenterRequestId by remember { mutableLongStateOf(0L) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
@@ -191,6 +217,7 @@ fun RecordScreen(modifier: Modifier = Modifier) {
 
     Scaffold(
         modifier = modifier,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Box(
@@ -198,11 +225,9 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            if (
-                (uiState is RecordingUiState.Recording || uiState is RecordingUiState.Paused) &&
-                !showSavePanel &&
-                !showStopConfirmDialog
-            ) {
+            val isActivelyRecording =
+                uiState is RecordingUiState.Recording || uiState is RecordingUiState.Paused
+            if (isActivelyRecording && !showSavePanel && !showStopConfirmDialog) {
                 ActiveRecordingContent(
                     points = recentPoints,
                     pointCount = pointCount,
@@ -217,6 +242,13 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                     onLocationError = { code, message ->
                         mapLocationError = "定位失败（$code）：$message"
                     },
+                    onMapLocation = { point ->
+                        mapLocationAccuracy = point.accuracy
+                        mapLocationTimestamp = point.timestamp
+                    },
+                    onGpsClick = { showGpsDetails = true },
+                    recenterRequestId = mapRecenterRequestId,
+                    onRecenter = { mapRecenterRequestId += 1L },
                     onPause = viewModel::pauseRecording,
                     onResume = viewModel::resumeRecording,
                     onFinish = {
@@ -226,23 +258,23 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
-                RecordingMapBackground(
+                IdleRecordingContent(
                     points = recentPoints,
                     locationPermissionGranted = locationPermissionGranted,
+                    showControls = !showSavePanel && !showStopConfirmDialog,
                     onLocationError = { code, message ->
                         mapLocationError = "定位失败（$code）：$message"
                     },
+                    onMapLocation = { point ->
+                        mapLocationAccuracy = point.accuracy
+                        mapLocationTimestamp = point.timestamp
+                    },
+                    onGpsClick = { showGpsDetails = true },
+                    recenterRequestId = mapRecenterRequestId,
+                    onRecenter = { mapRecenterRequestId += 1L },
+                    onStart = startRecording,
                     modifier = Modifier.fillMaxSize(),
                 )
-
-                if (uiState is RecordingUiState.PermissionDenied) {
-                    PermissionRequestCard(
-                        onRequestPermission = { requestLocationPermission(false) },
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp),
-                    )
-                }
 
                 if (showSavePanel) {
                     SaveRoutePanel(
@@ -251,16 +283,6 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                         onRouteNameChange = { routeName = it },
                         onSave = { viewModel.saveRoute(routeName) },
                         modifier = Modifier.align(Alignment.BottomCenter),
-                    )
-                } else if (!showStopConfirmDialog) {
-                    MainRecordButton(
-                        text = "GO",
-                        enabled = uiState !is RecordingUiState.PermissionDenied,
-                        active = false,
-                        onClick = startRecording,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 24.dp),
                     )
                 }
             }
@@ -279,6 +301,23 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                     },
                 )
             }
+
+            if (showGpsDetails) {
+                GpsAccuracyDialog(
+                    status = when {
+                        !locationPermissionGranted -> "GPS 未授权"
+                        uiState is RecordingUiState.Paused -> "GPS 已暂停"
+                        uiState is RecordingUiState.Recording && warmupRemainingSeconds > 0L -> {
+                            "GPS 预热中（剩余 ${warmupRemainingSeconds}s）"
+                        }
+                        uiState is RecordingUiState.Recording -> "GPS 采集中"
+                        else -> "GPS 待采集"
+                    },
+                    accuracy = mapLocationAccuracy ?: latestReceivedAccuracy,
+                    updatedAt = mapLocationTimestamp,
+                    onDismiss = { showGpsDetails = false },
+                )
+            }
         }
     }
 }
@@ -291,24 +330,230 @@ private fun Context.hasLocationPermission(): Boolean {
 }
 
 @Composable
+private fun IdleRecordingContent(
+    points: List<RoutePoint>,
+    locationPermissionGranted: Boolean,
+    showControls: Boolean,
+    onLocationError: (code: Int, message: String) -> Unit,
+    onMapLocation: (RoutePoint) -> Unit,
+    onGpsClick: () -> Unit,
+    recenterRequestId: Long,
+    onRecenter: () -> Unit,
+    onStart: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier = modifier) {
+        RecordingMapBackground(
+            points = points,
+            locationPermissionGranted = locationPermissionGranted,
+            onLocationError = onLocationError,
+            onLocation = onMapLocation,
+            recenterRequestId = recenterRequestId,
+            modifier = Modifier.fillMaxSize(),
+        )
+        RecordTopBar(
+            active = false,
+            gpsText = if (locationPermissionGranted) "GPS 待采集" else "GPS 未授权",
+            gpsType = if (locationPermissionGranted) StatusType.Interactive else StatusType.Error,
+            onGpsClick = onGpsClick,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+        RecordRecenterButton(
+            onClick = onRecenter,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 84.dp, end = 12.dp),
+        )
+        if (showControls) {
+            RoundStartRecordingButton(
+                enabled = true,
+                onClick = onStart,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 20.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecordTopBar(
+    active: Boolean,
+    gpsText: String,
+    gpsType: StatusType,
+    onGpsClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AppHeaderCard(
+        title = if (active) "路线记录中" else "路线记录",
+        subtitle = "记录采样点与轨迹",
+        leadingIcon = Icons.Rounded.Route,
+        modifier = modifier,
+    ) {
+        StatusChip(
+            icon = Icons.Rounded.GpsFixed,
+            text = gpsText,
+            type = gpsType,
+            onClick = onGpsClick,
+            contentDescription = "$gpsText，点击查看当前定位精度",
+        )
+    }
+}
+
+@Composable
+private fun GpsAccuracyDialog(
+    status: String,
+    accuracy: Float?,
+    updatedAt: Long?,
+    onDismiss: () -> Unit,
+) {
+    val accuracyText = accuracy?.let {
+        "±%.1f m".format(Locale.getDefault(), it)
+    } ?: "等待定位结果"
+    val qualityText = when {
+        accuracy == null -> "尚无数据"
+        accuracy <= 5f -> "优秀"
+        accuracy <= RECORDING_ACCURACY_THRESHOLD_METERS -> "合格"
+        accuracy <= 15f -> "一般"
+        else -> "较弱"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Rounded.GpsFixed,
+                contentDescription = null,
+                tint = BeltColors.PrimaryPurple,
+            )
+        },
+        title = { Text("GPS 定位详情") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                DataRow(label = "定位状态", value = status)
+                DataRow(label = "当前精度", value = accuracyText, boldValue = accuracy != null)
+                DataRow(label = "精度质量", value = qualityText)
+                DataRow(
+                    label = "记录合格标准",
+                    value = "≤ %.0f m".format(
+                        Locale.getDefault(),
+                        RECORDING_ACCURACY_THRESHOLD_METERS,
+                    ),
+                )
+                DataRow(
+                    label = "最近更新",
+                    value = updatedAt?.let { timestamp ->
+                        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
+                    } ?: "--",
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
+private fun RecordRecenterButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        modifier = modifier.pressScale(interactionSource),
+        shape = CircleShape,
+        color = BeltColors.Surface,
+        contentColor = BeltColors.PrimaryPurple,
+        shadowElevation = 3.dp,
+    ) {
+        IconButton(
+            onClick = onClick,
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .size(44.dp)
+                .semantics { contentDescription = "回到当前定位" },
+        ) {
+            Icon(Icons.Rounded.MyLocation, contentDescription = null)
+        }
+    }
+}
+
+@Composable
+private fun RoundStartRecordingButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        shape = CircleShape,
+        color = BeltColors.PurpleContainer.copy(alpha = 0.82f),
+        modifier = modifier
+            .pressScale(interactionSource, pressedScale = 0.93f)
+            .padding(2.dp),
+    ) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .padding(6.dp)
+                .size(88.dp),
+            contentPadding = PaddingValues(0.dp),
+            shape = CircleShape,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = BeltColors.PrimaryPurple,
+                contentColor = Color.White,
+                disabledContainerColor = BeltColors.Disabled,
+            ),
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("开始", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("记录", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+@Composable
 private fun RecordingMapBackground(
     points: List<RoutePoint>,
     locationPermissionGranted: Boolean,
     onLocationError: (code: Int, message: String) -> Unit,
+    onLocation: (RoutePoint) -> Unit,
+    recenterRequestId: Long,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val currentOnLocation by rememberUpdatedState(onLocation)
+    var latestLocation by remember { mutableStateOf<RoutePoint?>(null) }
+    var initialLocationCentered by remember { mutableStateOf(false) }
+    var handledRecenterRequestId by remember {
+        mutableLongStateOf(recenterRequestId)
+    }
     val mapLocationSource = remember {
         AMapMapLocationSource(
             context = context.applicationContext,
             onLocationError = onLocationError,
+            onLocation = { point ->
+                latestLocation = point
+                currentOnLocation(point)
+            },
         )
     }
     val mapView = remember {
         MapView(context).apply {
             onCreate(null)
             map.uiSettings.isZoomControlsEnabled = false
-            map.uiSettings.isMyLocationButtonEnabled = true
+            map.uiSettings.isZoomGesturesEnabled = false
+            map.uiSettings.isMyLocationButtonEnabled = false
+            map.moveCamera(CameraUpdateFactory.zoomTo(RECORD_MAP_ZOOM))
             map.setLocationSource(mapLocationSource)
             map.setMyLocationStyle(
                 MyLocationStyle()
@@ -329,6 +574,34 @@ private fun RecordingMapBackground(
             mapView.onPause()
             mapView.onDestroy()
         }
+    }
+
+    LaunchedEffect(locationPermissionGranted, latestLocation) {
+        if (!locationPermissionGranted) {
+            initialLocationCentered = false
+            return@LaunchedEffect
+        }
+        val point = latestLocation ?: return@LaunchedEffect
+        if (initialLocationCentered) return@LaunchedEffect
+        initialLocationCentered = true
+        mapView.map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(
+                LatLng(point.latitude, point.longitude),
+                RECORD_MAP_ZOOM,
+            ),
+        )
+    }
+
+    LaunchedEffect(recenterRequestId, latestLocation) {
+        val point = latestLocation ?: return@LaunchedEffect
+        if (recenterRequestId == handledRecenterRequestId) return@LaunchedEffect
+        handledRecenterRequestId = recenterRequestId
+        mapView.map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(
+                LatLng(point.latitude, point.longitude),
+                RECORD_MAP_ZOOM,
+            ),
+        )
     }
 
     AndroidView(
@@ -360,6 +633,10 @@ private fun ActiveRecordingContent(
     isPaused: Boolean,
     locationPermissionGranted: Boolean,
     onLocationError: (code: Int, message: String) -> Unit,
+    onMapLocation: (RoutePoint) -> Unit,
+    onGpsClick: () -> Unit,
+    recenterRequestId: Long,
+    onRecenter: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onFinish: () -> Unit,
@@ -376,11 +653,11 @@ private fun ActiveRecordingContent(
     BottomSheetScaffold(
         modifier = modifier,
         scaffoldState = scaffoldState,
-        sheetPeekHeight = if (isPaused) 248.dp else 132.dp,
-        sheetShape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
-        sheetContainerColor = BeltColors.SportPanel,
-        sheetContentColor = BeltColors.SportPanelText,
-        sheetDragHandle = { BottomSheetDefaults.DragHandle(color = BeltColors.SportPanelLabel) },
+        sheetPeekHeight = if (isPaused) 228.dp else 208.dp,
+        sheetShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        sheetContainerColor = BeltColors.Surface,
+        sheetContentColor = BeltColors.TextPrimary,
+        sheetDragHandle = { BottomSheetDefaults.DragHandle(color = BeltColors.Disabled) },
         sheetContent = {
             if (isPaused) {
                 PausedRecordingControls(
@@ -404,12 +681,41 @@ private fun ActiveRecordingContent(
             }
         },
     ) { _ ->
-        RecordingMapBackground(
-            points = points,
-            locationPermissionGranted = locationPermissionGranted,
-            onLocationError = onLocationError,
-            modifier = Modifier.fillMaxSize(),
-        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            RecordingMapBackground(
+                points = points,
+                locationPermissionGranted = locationPermissionGranted,
+                onLocationError = onLocationError,
+                onLocation = onMapLocation,
+                recenterRequestId = recenterRequestId,
+                modifier = Modifier.fillMaxSize(),
+            )
+            RecordTopBar(
+                active = true,
+                gpsText = when {
+                    isPaused -> "GPS 已暂停"
+                    warmupRemainingSeconds > 0L -> "GPS 预热 ${warmupRemainingSeconds}s"
+                    else -> "GPS 采集中"
+                },
+                gpsType = when {
+                    isPaused -> StatusType.Neutral
+                    warmupRemainingSeconds > 0L -> StatusType.Warning
+                    else -> StatusType.Success
+                },
+                onGpsClick = onGpsClick,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+            RecordRecenterButton(
+                onClick = onRecenter,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 84.dp, end = 12.dp),
+            )
+        }
     }
 }
 
@@ -424,69 +730,151 @@ private fun RecordingDetailsPanel(
     warmupRemainingSeconds: Long,
     onPause: () -> Unit,
 ) {
-    val averageSpeedKmh = averageRecordedSpeedKmh(distanceMeters, elapsedTimeSeconds)
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
         ) {
-            RecordMetric(
-                label = "已保存点数",
-                value = pointCount.toString(),
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = distanceMeters.formatRecordingDistance(),
+                    fontSize = 40.sp,
+                    lineHeight = 44.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "总路程",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BeltColors.TextSecondary,
+                )
+            }
+            StatusChip(
+                icon = Icons.Rounded.GpsFixed,
+                text = when {
+                    warmupRemainingSeconds > 0L -> "预热 ${warmupRemainingSeconds}s"
+                    latestPointAccepted == null -> "等待定位点"
+                    latestPointAccepted == false -> "定位点已丢弃"
+                    else -> "定位点已保存"
+                },
+                type = when {
+                    warmupRemainingSeconds > 0L -> StatusType.Warning
+                    latestPointAccepted == null -> StatusType.Neutral
+                    latestPointAccepted == false -> StatusType.Error
+                    else -> StatusType.Success
+                },
             )
-            RecordMetric(
-                label = "路程",
-                value = distanceMeters.formatRecordingDistance(),
-            )
-        }
-        Text(
-            text = distanceMeters.formatRecordingDistance(),
-            fontSize = 48.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            text = if (warmupRemainingSeconds > 0L) {
-                "GPS 预热中 · ${warmupRemainingSeconds}s"
-            } else {
-                "正在记录路线"
-            },
-            color = BeltColors.SportGreen,
-            fontWeight = FontWeight.Bold,
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            RecordDetail("记录时间", elapsedTimeSeconds.formatRecordingDuration())
-            RecordDetail("平均速度", "%.1f km/h".format(Locale.getDefault(), averageSpeedKmh))
-            RecordDetail("当前精度", accuracy?.let { "%.1f m".format(Locale.getDefault(), it) } ?: "--")
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            RecordDetail("定位状态", latestPointAccepted.formatAccuracyStatus())
-            RecordDetail("已丢弃点数", discardedPointCount.toString())
         }
         Button(
             onClick = onPause,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(72.dp),
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White,
-                contentColor = BeltColors.SportPanel,
+                containerColor = BeltColors.PrimaryPurple,
+                contentColor = Color.White,
             ),
         ) {
             Icon(Icons.Rounded.Pause, contentDescription = null)
             Spacer(modifier = Modifier.size(8.dp))
-            Text("暂停", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("暂停", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+        HorizontalDivider(color = BeltColors.Divider)
+        Text(
+            text = "详细数据",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            RecordDetailTile(
+                label = "记录时间",
+                value = elapsedTimeSeconds.formatRecordingDuration(),
+                icon = Icons.Rounded.Timer,
+                modifier = Modifier.weight(1f),
+            )
+            RecordDetailTile(
+                label = "当前精度",
+                value = accuracy?.let { "%.1f m".format(Locale.getDefault(), it) } ?: "--",
+                icon = Icons.Rounded.GpsFixed,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            RecordDetailTile(
+                label = "已保存点数",
+                value = pointCount.toString(),
+                icon = Icons.Rounded.Flag,
+                modifier = Modifier.weight(1f),
+            )
+            RecordDetailTile(
+                label = "已丢弃点数",
+                value = discardedPointCount.toString(),
+                icon = Icons.Rounded.Delete,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            text = "最近定位：${latestPointAccepted.formatAccuracyStatus()}。上拉或下拉可查看记录数据。",
+            style = MaterialTheme.typography.bodySmall,
+            color = BeltColors.TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun RecordDetailTile(
+    label: String,
+    value: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = BeltColors.Background,
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = BeltColors.PurpleContainer,
+                contentColor = BeltColors.PrimaryPurple,
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    modifier = Modifier.padding(6.dp),
+                )
+            }
+            Column {
+                Text(label, style = MaterialTheme.typography.bodySmall, color = BeltColors.TextSecondary)
+                Crossfade(
+                    targetState = value,
+                    animationSpec = tween(180),
+                ) { animatedValue ->
+                    Text(
+                        animatedValue,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
     }
 }
@@ -502,31 +890,41 @@ private fun PausedRecordingControls(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("记录已暂停", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        StatusChip(
+            icon = Icons.Rounded.Pause,
+            text = "记录已暂停",
+            type = StatusType.Warning,
+        )
+        Text(
+            "记录已暂停",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+        )
         Text(
             text = "$pointCount 个点  ·  ${distanceMeters.formatRecordingDistance()}  ·  ${elapsedTimeSeconds.formatRecordingDuration()}",
-            color = BeltColors.SportPanelLabel,
+            color = BeltColors.TextSecondary,
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             HoldToFinishRecordingButton(
                 onFinish = onFinish,
                 modifier = Modifier
                     .weight(1f)
-                    .height(80.dp),
+                    .height(60.dp),
             )
             Button(
                 onClick = onResume,
                 modifier = Modifier
                     .weight(1f)
-                    .height(80.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
+                    .height(60.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.PrimaryPurple),
             ) {
                 Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                 Spacer(modifier = Modifier.size(6.dp))
@@ -586,7 +984,7 @@ private fun HoldToFinishRecordingButton(
                     },
                 )
             },
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(20.dp),
         color = BeltColors.StopRed.copy(alpha = 0.12f),
         contentColor = BeltColors.StopRed,
         border = BorderStroke(2.dp, BeltColors.StopRed),
@@ -616,22 +1014,6 @@ private fun HoldToFinishRecordingButton(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun RecordMetric(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text(label, color = BeltColors.SportPanelLabel, fontSize = 13.sp)
-    }
-}
-
-@Composable
-private fun RecordDetail(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Text(label, color = BeltColors.SportPanelLabel, fontSize = 12.sp)
     }
 }
 
@@ -667,9 +1049,9 @@ private fun SaveRoutePanel(
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = BeltColors.SportPanel,
-        contentColor = BeltColors.SportPanelText,
-        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+        color = BeltColors.Surface,
+        contentColor = BeltColors.TextPrimary,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         Column(
             modifier = Modifier
@@ -685,7 +1067,7 @@ private fun SaveRoutePanel(
                 Box(
                     modifier = Modifier
                         .size(width = 40.dp, height = 4.dp)
-                        .background(BeltColors.SportPanelSecondary, RoundedCornerShape(2.dp)),
+                        .background(BeltColors.Disabled, RoundedCornerShape(2.dp)),
                 )
             }
             Row(
@@ -696,7 +1078,7 @@ private fun SaveRoutePanel(
                 Text("保存路线", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
                     "已保存点数 $pointCount",
-                    color = BeltColors.SportPanelLabel,
+                    color = BeltColors.TextSecondary,
                     fontWeight = FontWeight.Bold,
                 )
             }
@@ -707,13 +1089,13 @@ private fun SaveRoutePanel(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = BeltColors.SportPanelText,
-                    unfocusedTextColor = BeltColors.SportPanelText,
-                    focusedBorderColor = BeltColors.SportGreen,
-                    unfocusedBorderColor = BeltColors.SportPanelLabel,
-                    focusedLabelColor = BeltColors.SportGreen,
-                    unfocusedLabelColor = BeltColors.SportPanelLabel,
-                    cursorColor = BeltColors.SportGreen,
+                    focusedTextColor = BeltColors.TextPrimary,
+                    unfocusedTextColor = BeltColors.TextPrimary,
+                    focusedBorderColor = BeltColors.PrimaryPurple,
+                    unfocusedBorderColor = BeltColors.Disabled,
+                    focusedLabelColor = BeltColors.PrimaryPurple,
+                    unfocusedLabelColor = BeltColors.TextSecondary,
+                    cursorColor = BeltColors.PrimaryPurple,
                 ),
             )
             Button(
@@ -722,52 +1104,10 @@ private fun SaveRoutePanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.SportGreen),
+                shape = RoundedCornerShape(20.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BeltColors.PrimaryPurple),
             ) {
                 Text("保存路线")
-            }
-        }
-    }
-}
-
-@Composable
-private fun MainRecordButton(
-    text: String,
-    enabled: Boolean,
-    active: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val color = if (active) BeltColors.StopRed else BeltColors.SportGreen
-    Box(
-        modifier = modifier
-            .size(88.dp)
-            .background(color = color, shape = CircleShape)
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = text,
-            fontSize = if (active) 18.sp else 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
-        )
-    }
-}
-
-@Composable
-private fun PermissionRequestCard(
-    onRequestPermission: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Card(modifier = modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("需要精确位置权限才能显示当前位置并记录路线")
-            Button(onClick = onRequestPermission) {
-                Text("授权精确位置")
             }
         }
     }
@@ -809,30 +1149,114 @@ internal fun RouteDetailScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
+            .background(BeltColors.Background)
+            .statusBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        TextButton(onClick = onBack) {
-            Text("返回")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
+            }
+            Text(
+                text = "返回",
+                style = MaterialTheme.typography.titleSmall,
+                color = BeltColors.TextSecondary,
+            )
         }
 
-        Text(route.name, style = MaterialTheme.typography.headlineMedium)
-        DataRow(label = "路线 ID", value = route.id)
-        DataRow(label = "创建时间", value = route.createdAt.formatTimestamp())
-        DataRow(label = "定位点数量", value = route.points.size.toString())
-        DataRow(
-            label = "平均定位精度",
-            value = averageAccuracy?.let { "%.1f 米".format(it) } ?: "--",
+        Text(
+            text = route.name,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
-        DataRow(
-            label = "末端切线方向",
-            value = tangent?.let {
-                "${it.tangentBearingDegrees.toDirectionName()} %.1f°".format(it.tangentBearingDegrees)
-            } ?: "至少需要 2 个有效点",
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = BeltColors.Surface,
+            shadowElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
+                RouteDetailInfoRow(Icons.Rounded.Route, "路线 ID", route.id)
+                HorizontalDivider(color = BeltColors.Divider)
+                RouteDetailInfoRow(
+                    Icons.Rounded.CalendarMonth,
+                    "创建时间",
+                    route.createdAt.formatTimestamp(),
+                )
+                HorizontalDivider(color = BeltColors.Divider)
+                RouteDetailInfoRow(
+                    Icons.Rounded.Flag,
+                    "定位点数量",
+                    route.points.size.toString(),
+                )
+                HorizontalDivider(color = BeltColors.Divider)
+                RouteDetailInfoRow(
+                    Icons.Rounded.GpsFixed,
+                    "平均定位精度",
+                    averageAccuracy?.let { "%.1f 米".format(it) } ?: "--",
+                )
+                HorizontalDivider(color = BeltColors.Divider)
+                RouteDetailInfoRow(
+                    Icons.Rounded.Navigation,
+                    "末端切线方向",
+                    tangent?.let {
+                        "${it.tangentBearingDegrees.toDirectionName()} %.1f°"
+                            .format(it.tangentBearingDegrees)
+                    } ?: "至少需要 2 个有效点",
+                )
+            }
+        }
 
         MapRoutePreview(points = route.points, tangent = tangent)
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+@Composable
+private fun RouteDetailInfoRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    value: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = BeltColors.PurpleContainer,
+            contentColor = BeltColors.PrimaryPurple,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.padding(8.dp).size(20.dp),
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                color = BeltColors.TextSecondary,
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = BeltColors.TextPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -856,25 +1280,44 @@ private fun MapRoutePreview(
         }
     }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = BeltColors.Surface,
+        shadowElevation = 1.dp,
+    ) {
         Column(
             modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("地图预览", style = MaterialTheme.typography.titleMedium)
-            AndroidView(
-                factory = { mapView },
-                update = { view ->
-                    view.renderRoute(points, tangent)
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(520.dp),
-            )
-            Text(
-                text = "蓝色为起点，红色为终点，绿色为路线，橙色箭头为末端切线方向。",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Rounded.Map,
+                    contentDescription = null,
+                    tint = BeltColors.PrimaryPurple,
+                    modifier = Modifier.size(20.dp),
+                )
+                Text(
+                    "地图预览",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Surface(shape = RoundedCornerShape(14.dp)) {
+                AndroidView(
+                    factory = {
+                        mapView.apply {
+                            renderRoute(points, tangent)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp),
+                )
+            }
         }
     }
 }
@@ -920,7 +1363,9 @@ private fun MapView.renderLiveRoute(
     val latLngs = points.map { LatLng(it.latitude, it.longitude) }
     if (latLngs.isEmpty()) {
         if (!currentLocationVisible) {
-            aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(DEFAULT_MAP_CENTER, 19f))
+            aMap.moveCamera(
+                CameraUpdateFactory.newLatLngZoom(DEFAULT_MAP_CENTER, RECORD_MAP_ZOOM),
+            )
         }
         return
     }
@@ -934,7 +1379,9 @@ private fun MapView.renderLiveRoute(
         )
     }
 
-    aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLngs.last(), 20f))
+    aMap.moveCamera(
+        CameraUpdateFactory.newLatLngZoom(latLngs.last(), RECORD_MAP_ZOOM),
+    )
 }
 
 private fun MapView.renderRoute(
@@ -955,7 +1402,7 @@ private fun MapView.renderRoute(
             PolylineOptions()
                 .addAll(latLngs)
                 .width(14f)
-                .color(POLYLINE_COLOR),
+                .color(DETAIL_ROUTE_COLOR),
         )
     }
 
@@ -1065,7 +1512,8 @@ private const val END_HUE = 0f
 private const val ROUTE_HUE = 120f
 private val DEFAULT_MAP_CENTER = LatLng(39.9928, 116.3109)
 private val POLYLINE_COLOR = android.graphics.Color.rgb(46, 125, 50)
-private val TANGENT_COLOR = android.graphics.Color.rgb(255, 109, 0)
+private val DETAIL_ROUTE_COLOR = android.graphics.Color.rgb(113, 68, 199)
+private val TANGENT_COLOR = android.graphics.Color.rgb(89, 50, 168)
 private const val TINY_ROUTE_DEGREES = 0.001
 private const val SMALL_ROUTE_DEGREES = 0.003
 private const val MAX_VISIBLE_MARKERS = 80
@@ -1073,4 +1521,6 @@ private const val EARTH_RADIUS_METERS = 6_371_000.0
 private const val TANGENT_LENGTH_METERS = 30.0
 private const val TANGENT_ARROW_WING_METERS = 8.0
 private const val MAP_LOCATION_INTERVAL_MS = 3000L
+private const val RECORD_MAP_ZOOM = 20f
+private const val RECORDING_ACCURACY_THRESHOLD_METERS = 8f
 private const val HOLD_TO_FINISH_DURATION_MS = 1_500
