@@ -21,6 +21,8 @@
 
 #define MOTOR_COUNT 8
 #define MOTOR_DUTY 128
+#define MOTOR_COMMAND_TIMEOUT_MS 700
+#define MOTOR_WATCHDOG_POLL_MS 50
 #define UART_PORT UART_NUM_0
 
 static const char *TAG = "belt_motor";
@@ -39,16 +41,24 @@ static const ble_uuid128_t MOTOR_COMMAND_UUID = BLE_UUID128_INIT(
 static const int MOTOR_PINS[MOTOR_COUNT] = {4, 13, 14, 18, 19, 21, 22, 23};
 static uint8_t own_address_type;
 static SemaphoreHandle_t motor_mutex;
+static TickType_t last_motor_command_tick;
+static bool motor_active;
 
 static void start_advertising(void);
 
-static void stop_all_motors(void)
+static void stop_all_motors_locked(void)
 {
-    xSemaphoreTake(motor_mutex, portMAX_DELAY);
     for (int i = 0; i < MOTOR_COUNT; ++i) {
         ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i);
     }
+    motor_active = false;
+}
+
+static void stop_all_motors(void)
+{
+    xSemaphoreTake(motor_mutex, portMAX_DELAY);
+    stop_all_motors_locked();
     xSemaphoreGive(motor_mutex);
 }
 
@@ -64,7 +74,33 @@ static void turn_on_motor(int index)
         ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i, duty);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i);
     }
+    last_motor_command_tick = xTaskGetTickCount();
+    motor_active = true;
     xSemaphoreGive(motor_mutex);
+}
+
+static void motor_watchdog_task(void *argument)
+{
+    (void)argument;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(MOTOR_COMMAND_TIMEOUT_MS);
+
+    while (true) {
+        bool timed_out = false;
+        xSemaphoreTake(motor_mutex, portMAX_DELAY);
+        if (motor_active) {
+            TickType_t elapsed_ticks = xTaskGetTickCount() - last_motor_command_tick;
+            if (elapsed_ticks >= timeout_ticks) {
+                stop_all_motors_locked();
+                timed_out = true;
+            }
+        }
+        xSemaphoreGive(motor_mutex);
+
+        if (timed_out) {
+            ESP_LOGW(TAG, "Motor command timed out; all motors stopped");
+        }
+        vTaskDelay(pdMS_TO_TICKS(MOTOR_WATCHDOG_POLL_MS));
+    }
 }
 
 static bool handle_motor_command(uint8_t command)
@@ -110,6 +146,18 @@ static void init_all_motors(void)
     motor_mutex = xSemaphoreCreateMutex();
     if (motor_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create motor mutex");
+        abort();
+    }
+
+    BaseType_t task_result = xTaskCreate(
+        motor_watchdog_task,
+        "motor_watchdog",
+        2048,
+        NULL,
+        5,
+        NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create motor watchdog task");
         abort();
     }
 }
@@ -278,7 +326,10 @@ void app_main(void)
     init_all_motors();
     init_ble();
 
-    ESP_LOGI(TAG, "Ready: write ASCII 1-8 over UART or BLE; write 0 to stop");
+    ESP_LOGI(
+        TAG,
+        "Ready: write ASCII 1-8 over UART or BLE; write 0 to stop; watchdog %d ms",
+        MOTOR_COMMAND_TIMEOUT_MS);
     uint8_t command = 0;
     while (true) {
         int length = uart_read_bytes(UART_PORT, &command, 1, pdMS_TO_TICKS(20));

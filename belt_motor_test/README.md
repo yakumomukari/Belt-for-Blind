@@ -27,7 +27,7 @@ PWM runs at 1 kHz with 8-bit duty resolution. The active motor uses duty 128, an
 - `1` through `8`: activate that motor
 - `0`: stop every motor
 
-The firmware stops every motor when the BLE client disconnects.
+The firmware stops every motor when the BLE client disconnects. A motor command also expires after 700 ms, so a lost stop command, stalled phone process, or interrupted background task cannot leave a motor running indefinitely. Sending another `1` through `8` command refreshes the watchdog.
 
 ## Build and flash
 

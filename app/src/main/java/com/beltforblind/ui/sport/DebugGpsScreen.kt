@@ -29,6 +29,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -51,10 +52,14 @@ import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
 import com.beltforblind.navigation.heading.PhoneHeadingAccuracy
 import com.beltforblind.navigation.heading.PhoneHeadingSample
 import com.beltforblind.navigation.heading.PhoneHeadingStatus
+import com.beltforblind.navigation.vibration.NavigationMotorSignalPlanner
 import com.beltforblind.navigation.vibration.NavigationVibrationPlanner
 import com.beltforblind.route.location.LocationSimulationProvider
 import com.beltforblind.route.location.SimulationScenario
 import com.beltforblind.route.tangent.RouteTangent
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -155,7 +160,8 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     var permissionMessage by remember { mutableStateOf<String?>(null) }
     var northTestEnabled by remember { mutableStateOf(false) }
     var headingSample by remember { mutableStateOf(PhoneHeadingSample()) }
-    var lastAutomaticMotor by remember { mutableStateOf<Int?>(null) }
+    var manualMotorJob by remember { mutableStateOf<Job?>(null) }
+    val coroutineScope = rememberCoroutineScope()
     val headingProvider = remember(context) {
         AndroidPhoneHeadingProvider(context.applicationContext) { sample ->
             headingSample = sample
@@ -207,33 +213,42 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     LaunchedEffect(state.isConnected) {
         if (!state.isConnected && northTestEnabled) {
             northTestEnabled = false
-            lastAutomaticMotor = null
         }
     }
 
-    LaunchedEffect(
-        northTestEnabled,
-        state.isConnected,
-        headingSample.status,
-        northDecision?.motorNumber,
-    ) {
+    val northSignalPattern = remember(northDecision, northTestEnabled, state.isConnected) {
+        northDecision?.let { decision ->
+            NavigationMotorSignalPlanner.patternFor(
+                decision = decision,
+                enabled = northTestEnabled && state.isConnected,
+            )
+        }
+    }
+    LaunchedEffect(northSignalPattern, northTestEnabled, state.isConnected) {
         if (!northTestEnabled || !state.isConnected) {
-            lastAutomaticMotor = null
             return@LaunchedEffect
         }
 
-        val targetMotor = northDecision?.motorNumber
-        if (targetMotor == lastAutomaticMotor) return@LaunchedEffect
-        if (targetMotor == null) {
+        val pattern = northSignalPattern
+        if (pattern == null) {
             controller.stopMotor()
-        } else {
-            controller.activateMotor(targetMotor)
+            return@LaunchedEffect
         }
-        lastAutomaticMotor = targetMotor
+        try {
+            do {
+                pattern.frames.forEach { frame ->
+                    frame.motorNumber?.let(controller::activateMotor)
+                        ?: controller.stopMotor()
+                    delay(frame.durationMillis)
+                }
+            } while (pattern.repeats)
+        } finally {
+            controller.stopMotor()
+        }
     }
 
     Text("腰带电机测试", style = MaterialTheme.typography.titleLarge)
-    Text("连接后点击轮盘外圈选择单个电机，点击中心 STOP 停止全部电机。")
+    Text("连接后点击轮盘外圈触发单个电机短振，点击中心 STOP 停止全部电机。")
     Text(
         text = "连接状态：${state.status.displayName()}",
         style = MaterialTheme.typography.titleMedium,
@@ -285,13 +300,13 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     Text("预期：面北→1号，面东→7号，面南→5号，面西→3号。")
     Button(
         onClick = {
+            manualMotorJob?.cancel()
+            manualMotorJob = null
             if (northTestEnabled) {
                 northTestEnabled = false
-                lastAutomaticMotor = null
                 controller.stopMotor()
             } else {
                 controller.stopMotor()
-                lastAutomaticMotor = null
                 northTestEnabled = true
             }
         },
@@ -306,8 +321,19 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     MotorWheel(
         selectedMotor = state.selectedMotor,
         enabled = state.isConnected && !northTestEnabled,
-        onMotorSelected = controller::activateMotor,
-        onStop = controller::stopMotor,
+        onMotorSelected = { motorNumber ->
+            manualMotorJob?.cancel()
+            manualMotorJob = coroutineScope.launch {
+                controller.activateMotor(motorNumber)
+                delay(MANUAL_MOTOR_PULSE_MILLIS)
+                controller.stopMotor()
+            }
+        },
+        onStop = {
+            manualMotorJob?.cancel()
+            manualMotorJob = null
+            controller.stopMotor()
+        },
     )
     Text(
         text = state.selectedMotor?.let { "当前电机：$it" } ?: "当前电机：全部停止",
@@ -486,6 +512,7 @@ private fun SimulationScenario.description(): String {
 
 private const val STOP_RADIUS_RATIO = 0.27f
 private const val NORTH_TEST_ACCURACY_METERS = 3f
+private const val MANUAL_MOTOR_PULSE_MILLIS = 500L
 
 private val NORTH_ROUTE_TANGENT = RouteTangent(
     segmentStartIndex = 0,

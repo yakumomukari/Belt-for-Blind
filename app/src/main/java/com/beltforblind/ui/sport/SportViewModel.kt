@@ -1,10 +1,13 @@
 package com.beltforblind.ui.sport
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.CreationExtras
+import com.beltforblind.navigation.vibration.NavigationInputFreshness
+import com.beltforblind.navigation.vibration.NavigationInputFreshnessPolicy
 import com.beltforblind.navigation.vibration.NavigationVibrationDecision
 import com.beltforblind.navigation.vibration.NavigationVibrationPlanner
 import com.beltforblind.navigation.vibration.NavigationVibrationStatus
@@ -26,6 +29,7 @@ import kotlinx.coroutines.withContext
 
 class SportViewModel(
     private val routeStore: RouteStore,
+    private val monotonicClockMillis: () -> Long = SystemClock::elapsedRealtime,
 ) : ViewModel() {
     private val mutableUiState = MutableStateFlow(SportUiState())
     val uiState: StateFlow<SportUiState> = mutableUiState.asStateFlow()
@@ -33,6 +37,8 @@ class SportViewModel(
     private var timerJob: Job? = null
     private var stageBeforePause = SportStage.RunningExpanded
     private val metricsAccumulator = SportMetricsAccumulator()
+    private var lastLocationUpdateMillis: Long? = null
+    private var lastHeadingUpdateMillis: Long? = null
 
     init {
         loadRoutes()
@@ -75,22 +81,7 @@ class SportViewModel(
             SportUiEvent.MapMovedByUser -> update { copy(isMapFollowingUser = false) }
             is SportUiEvent.LocationPermissionChanged -> onLocationPermissionChanged(event.granted)
             is SportUiEvent.LocationUpdated -> onLocationUpdated(event.point)
-            is SportUiEvent.LocationFailed -> update {
-                copy(
-                    gpsState = GpsState(
-                        quality = GpsQuality.Unavailable,
-                        errorMessage = event.message,
-                    ),
-                    navigationVibrationDecision = if (stage in RUNNING_STAGES) {
-                        NavigationVibrationDecision(
-                            status = NavigationVibrationStatus.UnreliableLocation,
-                        )
-                    } else {
-                        NavigationVibrationDecision()
-                    },
-                    message = "定位失败（${event.code}）：${event.message}",
-                )
-            }
+            is SportUiEvent.LocationFailed -> onLocationFailed(event.code, event.message)
             is SportUiEvent.HeadingUpdated -> onHeadingUpdated(event.headingDegrees)
             SportUiEvent.HeadingUnavailable -> onHeadingUnavailable()
             is SportUiEvent.BeltConnectionChanged -> update {
@@ -104,6 +95,8 @@ class SportViewModel(
     }
 
     private fun onLocationUpdated(point: RoutePoint) {
+        val nowMillis = monotonicClockMillis()
+        lastLocationUpdateMillis = nowMillis
         val state = mutableUiState.value
         if (state.stage !in RUNNING_STAGES) {
             update { copy(currentLocation = point, gpsState = GpsState.from(point)) }
@@ -118,7 +111,7 @@ class SportViewModel(
             ?.takeIf { it.progress >= state.routeProgress.toDouble() }
         val vibrationDecision = NavigationVibrationPlanner.plan(
             tangent = rawTangent,
-            headingDegrees = state.headingDegrees,
+            headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = point.accuracy,
             previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
@@ -140,6 +133,7 @@ class SportViewModel(
             onHeadingUnavailable()
             return
         }
+        lastHeadingUpdateMillis = monotonicClockMillis()
         val state = mutableUiState.value.copy(headingDegrees = headingDegrees.normalize360())
         mutableUiState.value = state.copy(
             navigationVibrationDecision = planNavigation(state),
@@ -147,6 +141,7 @@ class SportViewModel(
     }
 
     private fun onHeadingUnavailable() {
+        lastHeadingUpdateMillis = null
         val state = mutableUiState.value.copy(headingDegrees = null)
         mutableUiState.value = state.copy(
             navigationVibrationDecision = planNavigation(state),
@@ -155,6 +150,10 @@ class SportViewModel(
 
     private fun planNavigation(state: SportUiState): NavigationVibrationDecision {
         if (state.stage !in RUNNING_STAGES) return NavigationVibrationDecision()
+        val nowMillis = monotonicClockMillis()
+        if (inputFreshness(nowMillis) == NavigationInputFreshness.LocationStale) {
+            return staleLocationDecision(state.navigationVibrationDecision)
+        }
         if (state.gpsState.quality == GpsQuality.Unavailable || state.gpsState.errorMessage != null) {
             return NavigationVibrationDecision(
                 status = NavigationVibrationStatus.UnreliableLocation,
@@ -169,7 +168,7 @@ class SportViewModel(
         }
         return NavigationVibrationPlanner.plan(
             tangent = tangent,
-            headingDegrees = state.headingDegrees,
+            headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = point.accuracy,
             previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
@@ -228,6 +227,11 @@ class SportViewModel(
             update { copy(message = reason) }
             return
         }
+        val nowMillis = monotonicClockMillis()
+        if (inputFreshness(nowMillis) == NavigationInputFreshness.LocationStale) {
+            update { copy(message = "定位数据已超时，正在等待新的定位点") }
+            return
+        }
 
         metricsAccumulator.reset(state.currentLocation)
         val rawTangent = state.currentLocation?.let { point ->
@@ -240,7 +244,7 @@ class SportViewModel(
         }
         val vibrationDecision = NavigationVibrationPlanner.plan(
             tangent = rawTangent,
-            headingDegrees = state.headingDegrees,
+            headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = state.currentLocation?.accuracy,
             previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
@@ -341,6 +345,7 @@ class SportViewModel(
     }
 
     private fun onLocationPermissionChanged(granted: Boolean) {
+        if (!granted) lastLocationUpdateMillis = null
         update {
             copy(
                 locationPermissionGranted = granted,
@@ -364,9 +369,73 @@ class SportViewModel(
         timerJob = viewModelScope.launch {
             while (isActive && mutableUiState.value.stage in RUNNING_STAGES) {
                 delay(1_000L)
-                update { copy(elapsedTimeSeconds = elapsedTimeSeconds + 1L) }
+                val freshness = inputFreshness(monotonicClockMillis())
+                update {
+                    copy(
+                        elapsedTimeSeconds = elapsedTimeSeconds + 1L,
+                        navigationVibrationDecision = when (freshness) {
+                            NavigationInputFreshness.LocationStale -> {
+                                staleLocationDecision(navigationVibrationDecision)
+                            }
+                            NavigationInputFreshness.HeadingStale -> {
+                                if (navigationVibrationDecision.status == NavigationVibrationStatus.Guiding) {
+                                    navigationVibrationDecision.copy(
+                                        status = NavigationVibrationStatus.AwaitingHeading,
+                                        motorNumber = null,
+                                        relativeBearingDegrees = null,
+                                    )
+                                } else {
+                                    navigationVibrationDecision
+                                }
+                            }
+                            NavigationInputFreshness.Fresh -> navigationVibrationDecision
+                        },
+                    )
+                }
             }
         }
+    }
+
+    private fun onLocationFailed(code: Int, message: String) {
+        lastLocationUpdateMillis = null
+        update {
+            copy(
+                gpsState = GpsState(
+                    quality = GpsQuality.Unavailable,
+                    errorMessage = message,
+                ),
+                navigationVibrationDecision = if (stage in RUNNING_STAGES) {
+                    staleLocationDecision(navigationVibrationDecision)
+                } else {
+                    NavigationVibrationDecision()
+                },
+                message = "定位失败（$code）：$message",
+            )
+        }
+    }
+
+    private fun inputFreshness(nowMillis: Long): NavigationInputFreshness {
+        return NavigationInputFreshnessPolicy.evaluate(
+            nowMillis = nowMillis,
+            lastLocationUpdateMillis = lastLocationUpdateMillis,
+            lastHeadingUpdateMillis = lastHeadingUpdateMillis,
+        )
+    }
+
+    private fun freshHeadingDegrees(state: SportUiState, nowMillis: Long): Double? {
+        return state.headingDegrees.takeIf {
+            inputFreshness(nowMillis) == NavigationInputFreshness.Fresh
+        }
+    }
+
+    private fun staleLocationDecision(
+        current: NavigationVibrationDecision,
+    ): NavigationVibrationDecision {
+        return current.copy(
+            status = NavigationVibrationStatus.UnreliableLocation,
+            motorNumber = null,
+            relativeBearingDegrees = null,
+        )
     }
 
     private inline fun update(transform: SportUiState.() -> SportUiState) {
