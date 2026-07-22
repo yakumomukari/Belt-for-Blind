@@ -27,6 +27,7 @@ object NavigationVibrationPlanner {
         tangent: RouteTangent?,
         headingDegrees: Double?,
         locationAccuracyMeters: Float?,
+        previousMotorNumber: Int? = null,
     ): NavigationVibrationDecision {
         if (tangent == null) {
             return NavigationVibrationDecision(status = NavigationVibrationStatus.RouteUnavailable)
@@ -67,7 +68,10 @@ object NavigationVibrationPlanner {
         ).normalizeSigned()
         return baseDecision.copy(
             status = NavigationVibrationStatus.Guiding,
-            motorNumber = motorForRelativeBearing(relativeBearing),
+            motorNumber = stableMotorForRelativeBearing(
+                relativeBearingDegrees = relativeBearing,
+                previousMotorNumber = previousMotorNumber,
+            ),
             relativeBearingDegrees = relativeBearing,
         )
     }
@@ -78,6 +82,25 @@ object NavigationVibrationPlanner {
         return floor((clockwiseBearing + HALF_MOTOR_SECTOR_DEGREES) / MOTOR_SECTOR_DEGREES)
             .toInt()
             .mod(MOTOR_COUNT) + 1
+    }
+
+    fun stableMotorForRelativeBearing(
+        relativeBearingDegrees: Double,
+        previousMotorNumber: Int?,
+    ): Int {
+        require(relativeBearingDegrees.isFinite()) { "Relative bearing must be finite." }
+        if (previousMotorNumber == null || previousMotorNumber !in 1..MOTOR_COUNT) {
+            return motorForRelativeBearing(relativeBearingDegrees)
+        }
+
+        val previousSectorCenter = (previousMotorNumber - 1) * MOTOR_SECTOR_DEGREES
+        val distanceFromPreviousCenter = (
+            relativeBearingDegrees.normalize360() - previousSectorCenter
+        ).normalizeSigned()
+        if (kotlin.math.abs(distanceFromPreviousCenter) <= STABLE_SECTOR_HALF_WIDTH_DEGREES) {
+            return previousMotorNumber
+        }
+        return motorForRelativeBearing(relativeBearingDegrees)
     }
 
     private fun Double.normalize360(): Double {
@@ -102,6 +125,9 @@ object NavigationVibrationPlanner {
     private const val MOTOR_COUNT = 8
     private const val MOTOR_SECTOR_DEGREES = 45.0
     private const val HALF_MOTOR_SECTOR_DEGREES = MOTOR_SECTOR_DEGREES / 2.0
+    private const val MOTOR_SECTOR_HYSTERESIS_DEGREES = 8.0
+    private const val STABLE_SECTOR_HALF_WIDTH_DEGREES =
+        HALF_MOTOR_SECTOR_DEGREES + MOTOR_SECTOR_HYSTERESIS_DEGREES
     private const val HALF_CIRCLE_DEGREES = 180.0
     private const val FULL_CIRCLE_DEGREES = 360.0
 }

@@ -117,6 +117,7 @@ class SportViewModel(
             tangent = rawTangent,
             headingDegrees = state.headingDegrees,
             locationAccuracyMeters = point.accuracy,
+            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
         update {
             copy(
@@ -167,6 +168,7 @@ class SportViewModel(
             tangent = tangent,
             headingDegrees = state.headingDegrees,
             locationAccuracyMeters = point.accuracy,
+            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
     }
 
@@ -237,6 +239,7 @@ class SportViewModel(
             tangent = rawTangent,
             headingDegrees = state.headingDegrees,
             locationAccuracyMeters = state.currentLocation?.accuracy,
+            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
         )
         update {
             copy(

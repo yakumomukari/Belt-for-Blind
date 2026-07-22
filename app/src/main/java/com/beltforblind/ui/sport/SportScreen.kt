@@ -89,6 +89,7 @@ import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
 import com.beltforblind.navigation.heading.PhoneBackHeadingCalculator
 import com.beltforblind.navigation.heading.PhoneHeadingSample
 import com.beltforblind.navigation.heading.PhoneHeadingStatus
+import com.beltforblind.navigation.vibration.NavigationMotorSignalPlanner
 import com.beltforblind.navigation.vibration.NavigationVibrationStatus
 import com.beltforblind.ui.components.AppHeaderCard
 import com.beltforblind.ui.components.StatusChip
@@ -96,6 +97,7 @@ import com.beltforblind.ui.components.StatusType
 import com.beltforblind.ui.components.pressScale
 import com.beltforblind.ui.theme.BeltColors
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -189,8 +191,18 @@ fun SportScreen(
         )
     }
 
-    LaunchedEffect(isActivelyRunning) {
-        if (isActivelyRunning) requestBeltConnection()
+    LaunchedEffect(isActivelyRunning, motorState.status) {
+        if (!isActivelyRunning) return@LaunchedEffect
+        if (motorState.status == MotorConnectionStatus.Error) {
+            delay(BELT_RECONNECT_DELAY_MS)
+        }
+        if (motorState.status in setOf(
+                MotorConnectionStatus.Disconnected,
+                MotorConnectionStatus.Error,
+            )
+        ) {
+            requestBeltConnection()
+        }
     }
 
     LaunchedEffect(headingSample, state.currentLocation, isActivelyRunning) {
@@ -223,26 +235,36 @@ fun SportScreen(
         )
     }
 
-    val targetMotor = state.navigationVibrationDecision.motorNumber.takeIf {
-        isActivelyRunning &&
-            motorState.isConnected &&
-            state.navigationVibrationDecision.status == NavigationVibrationStatus.Guiding
-    }
-    LaunchedEffect(
-        targetMotor,
+    val motorSignalPattern = remember(
+        state.navigationVibrationDecision,
         isActivelyRunning,
         motorState.isConnected,
-        motorState.selectedMotor,
-        motorState.message,
     ) {
-        if (!motorState.isConnected || targetMotor == motorState.selectedMotor) {
+        NavigationMotorSignalPlanner.patternFor(
+            decision = state.navigationVibrationDecision,
+            enabled = isActivelyRunning && motorState.isConnected,
+        )
+    }
+    LaunchedEffect(
+        motorSignalPattern,
+        motorState.isConnected,
+    ) {
+        if (!motorState.isConnected) return@LaunchedEffect
+        if (motorSignalPattern == null) {
+            if (motorState.selectedMotor != null) motorController.stopMotor()
             return@LaunchedEffect
         }
 
-        if (targetMotor == null) {
+        try {
+            do {
+                motorSignalPattern.frames.forEach { frame ->
+                    frame.motorNumber?.let(motorController::activateMotor)
+                        ?: motorController.stopMotor()
+                    delay(frame.durationMillis)
+                }
+            } while (motorSignalPattern.repeats)
+        } finally {
             motorController.stopMotor()
-        } else {
-            motorController.activateMotor(targetMotor)
         }
     }
 
@@ -575,9 +597,9 @@ private fun RunningRouteStatusCard(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = "路线引导中 · ${(state.routeProgress * 100).toInt()}%",
+                    text = state.navigationStatusText(),
                     style = MaterialTheme.typography.bodySmall,
-                    color = BeltColors.PrimaryPurple,
+                    color = state.navigationStatusColor(),
                 )
             }
         }
@@ -1017,4 +1039,35 @@ private fun SportUiState.startRequirementText(): String {
     }
 }
 
+private fun SportUiState.navigationStatusText(): String {
+    val progress = (routeProgress * 100).toInt()
+    return when (navigationVibrationDecision.status) {
+        NavigationVibrationStatus.Guiding -> {
+            "方向引导中 · ${navigationVibrationDecision.motorNumber ?: "-"}号电机 · ${progress}%"
+        }
+        NavigationVibrationStatus.OffRoute -> "已偏离路线 · 左右双振提醒"
+        NavigationVibrationStatus.Arrived -> "已到达终点 · 三次短振"
+        NavigationVibrationStatus.UnreliableLocation -> "定位精度不足 · 震动已暂停"
+        NavigationVibrationStatus.AwaitingHeading -> "正在获取手机朝向 · 震动已暂停"
+        NavigationVibrationStatus.RouteUnavailable -> "暂时无法匹配路线"
+        NavigationVibrationStatus.Inactive -> "路线引导准备中"
+    }
+}
+
+private fun SportUiState.navigationStatusColor(): Color {
+    return when (navigationVibrationDecision.status) {
+        NavigationVibrationStatus.Guiding,
+        NavigationVibrationStatus.Arrived,
+        -> BeltColors.Success
+        NavigationVibrationStatus.OffRoute,
+        NavigationVibrationStatus.UnreliableLocation,
+        -> BeltColors.Error
+        NavigationVibrationStatus.AwaitingHeading,
+        NavigationVibrationStatus.RouteUnavailable,
+        NavigationVibrationStatus.Inactive,
+        -> BeltColors.TextSecondary
+    }
+}
+
 private const val HOLD_TO_STOP_DURATION_MS = 1_500
+private const val BELT_RECONNECT_DELAY_MS = 3_000L

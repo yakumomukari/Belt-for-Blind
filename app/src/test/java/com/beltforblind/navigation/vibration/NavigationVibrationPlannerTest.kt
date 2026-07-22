@@ -33,6 +33,30 @@ class NavigationVibrationPlannerTest {
     }
 
     @Test
+    fun keepsPreviousMotorInsideHysteresisMargin() {
+        val decision = NavigationVibrationPlanner.plan(
+            tangent = tangent(targetBearing = 28.0),
+            headingDegrees = 0.0,
+            locationAccuracyMeters = 3f,
+            previousMotorNumber = 1,
+        )
+
+        assertEquals(1, decision.motorNumber)
+    }
+
+    @Test
+    fun switchesMotorAfterLeavingHysteresisMargin() {
+        val decision = NavigationVibrationPlanner.plan(
+            tangent = tangent(targetBearing = 31.0),
+            headingDegrees = 0.0,
+            locationAccuracyMeters = 3f,
+            previousMotorNumber = 1,
+        )
+
+        assertEquals(2, decision.motorNumber)
+    }
+
+    @Test
     fun suppressesMotorWhenLocationIsUnreliable() {
         val decision = NavigationVibrationPlanner.plan(
             tangent = tangent(),
