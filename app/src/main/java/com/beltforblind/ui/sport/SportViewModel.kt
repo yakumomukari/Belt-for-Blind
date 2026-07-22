@@ -96,6 +96,9 @@ class SportViewModel(
             is SportUiEvent.BeltConnectionChanged -> update {
                 copy(beltConnectionState = event.state)
             }
+            is SportUiEvent.BackgroundLockFailed -> update {
+                copy(message = "后台运行锁启动失败：${event.message}")
+            }
             SportUiEvent.DismissMessage -> update { copy(message = null) }
         }
     }

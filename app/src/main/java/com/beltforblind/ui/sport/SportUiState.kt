@@ -102,6 +102,7 @@ sealed interface SportUiEvent {
     data class HeadingUpdated(val headingDegrees: Double) : SportUiEvent
     data object HeadingUnavailable : SportUiEvent
     data class BeltConnectionChanged(val state: BeltConnectionState) : SportUiEvent
+    data class BackgroundLockFailed(val message: String) : SportUiEvent
     data object DismissMessage : SportUiEvent
 }
 

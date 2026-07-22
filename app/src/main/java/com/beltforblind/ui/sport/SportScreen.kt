@@ -91,6 +91,7 @@ import com.beltforblind.navigation.heading.PhoneHeadingSample
 import com.beltforblind.navigation.heading.PhoneHeadingStatus
 import com.beltforblind.navigation.vibration.NavigationMotorSignalPlanner
 import com.beltforblind.navigation.vibration.NavigationVibrationStatus
+import com.beltforblind.sport.background.SportBackgroundLock
 import com.beltforblind.ui.components.AppHeaderCard
 import com.beltforblind.ui.components.StatusChip
 import com.beltforblind.ui.components.StatusType
@@ -148,6 +149,9 @@ fun SportScreen(
             )
         }
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {}
     val requestBeltConnection = {
         if (motorState.status !in setOf(
                 MotorConnectionStatus.Scanning,
@@ -175,6 +179,7 @@ fun SportScreen(
         onDispose {
             headingProvider.stop()
             motorController.close()
+            SportBackgroundLock.stop(context)
         }
     }
 
@@ -202,6 +207,30 @@ fun SportScreen(
             )
         ) {
             requestBeltConnection()
+        }
+    }
+
+    LaunchedEffect(isActivelyRunning) {
+        if (!isActivelyRunning) {
+            SportBackgroundLock.stop(context)
+            return@LaunchedEffect
+        }
+
+        runCatching {
+            SportBackgroundLock.start(context)
+        }.onFailure { error ->
+            viewModel.onEvent(
+                SportUiEvent.BackgroundLockFailed(
+                    error.message ?: "系统拒绝启动后台运动服务",
+                ),
+            )
+        }
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
