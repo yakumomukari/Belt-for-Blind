@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
@@ -18,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,11 +35,13 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
 
     private val mutableState = MutableStateFlow(MotorControlState())
     override val state: StateFlow<MotorControlState> = mutableState.asStateFlow()
+    override val gpsSample: StateFlow<BeltGpsSample?> = BeltGpsRepository.sample
 
     private var bluetoothGatt: BluetoothGatt? = null
     private var commandCharacteristic: BluetoothGattCharacteristic? = null
-    private var inFlightCommand: Int? = null
-    private var queuedCommand: Int? = null
+    private var gpsCharacteristic: BluetoothGattCharacteristic? = null
+    private var inFlightCommand: PendingMotorCommand? = null
+    private var queuedCommand: PendingMotorCommand? = null
 
     private val scanTimeout = Runnable {
         if (mutableState.value.status == MotorConnectionStatus.Scanning) {
@@ -127,11 +131,50 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
             }
 
             commandCharacteristic = characteristic
+            gpsCharacteristic = service.getCharacteristic(MotorBleProtocol.GPS_CHARACTERISTIC_UUID)
+            val gpsNotificationsStarted = gpsCharacteristic?.let { gps ->
+                enableGpsNotifications(gatt, gps)
+            }
             mutableState.value = MotorControlState(
                 status = MotorConnectionStatus.Connected,
                 deviceName = mutableState.value.deviceName ?: MotorBleProtocol.DEVICE_NAME,
-                message = "腰带已连接",
+                message = when (gpsNotificationsStarted) {
+                    null -> "腰带已连接（固件未提供 GPS）"
+                    true -> "腰带已连接，正在等待外置 GPS"
+                    false -> "腰带已连接，GPS 通知启用失败"
+                },
             )
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int,
+        ) {
+            if (descriptor.uuid != CLIENT_CHARACTERISTIC_CONFIGURATION_UUID) return
+            finishConnection(
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    "\u8170\u5e26\u5df2\u8fde\u63a5\uff0c\u5916\u7f6e GPS \u5df2\u542f\u7528"
+                } else {
+                    "\u8170\u5e26\u5df2\u8fde\u63a5\uff0cGPS \u901a\u77e5\u542f\u7528\u5931\u8d25"
+                },
+            )
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            handleGpsNotification(characteristic, value)
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+        ) {
+            handleGpsNotification(characteristic, characteristic.value ?: return)
         }
 
         override fun onCharacteristicWrite(
@@ -144,9 +187,25 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
             val command = inFlightCommand
             inFlightCommand = null
             if (status == BluetoothGatt.GATT_SUCCESS && command != null) {
+                val strongestMotor = command.intensities
+                    .withIndex()
+                    .filter { it.value > 0 }
+                    .maxByOrNull { it.value }
+                    ?.index
+                    ?.plus(1)
+                val activeDescription = command.intensities
+                    .mapIndexedNotNull { index, intensity ->
+                        intensity.takeIf { it > 0 }?.let { "${index + 1}号:$it" }
+                    }
+                    .joinToString("，")
                 mutableState.value = mutableState.value.copy(
-                    selectedMotor = command.takeIf { it != 0 },
-                    message = if (command == 0) "全部电机已停止" else "正在控制 $command 号电机",
+                    selectedMotor = strongestMotor,
+                    motorIntensities = command.intensities,
+                    message = if (strongestMotor == null) {
+                        "全部电机已停止"
+                    } else {
+                        "电机强度：$activeDescription"
+                    },
                 )
             } else {
                 mutableState.value = mutableState.value.copy(
@@ -156,7 +215,7 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
 
             queuedCommand?.let { nextCommand ->
                 queuedCommand = null
-                writeCommand(nextCommand)
+                writeMotorCommand(nextCommand)
             }
         }
     }
@@ -198,12 +257,37 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
     }
 
     override fun activateMotor(motorNumber: Int) {
-        require(motorNumber in 1..8) { "Motor number must be between 1 and 8" }
-        writeCommand(motorNumber)
+        require(motorNumber in 1..MotorBleProtocol.MOTOR_COUNT) {
+            "Motor number must be between 1 and ${MotorBleProtocol.MOTOR_COUNT}"
+        }
+        val intensities = List(MotorBleProtocol.MOTOR_COUNT) { index ->
+            if (index == motorNumber - 1) LEGACY_MOTOR_INTENSITY else 0
+        }
+        writeMotorCommand(
+            PendingMotorCommand(
+                payload = motorNumber.toString().encodeToByteArray(),
+                intensities = intensities,
+            ),
+        )
+    }
+
+    override fun setMotorIntensities(intensities: List<Int>) {
+        val snapshot = intensities.toList()
+        writeMotorCommand(
+            PendingMotorCommand(
+                payload = MotorBleProtocol.encodeIntensityCommand(snapshot),
+                intensities = snapshot,
+            ),
+        )
     }
 
     override fun stopMotor() {
-        writeCommand(0)
+        writeMotorCommand(
+            PendingMotorCommand(
+                payload = "0".encodeToByteArray(),
+                intensities = List(MotorBleProtocol.MOTOR_COUNT) { 0 },
+            ),
+        )
     }
 
     override fun disconnect() {
@@ -214,7 +298,7 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
         disconnectInternal(updateState = false)
     }
 
-    private fun writeCommand(command: Int) {
+    private fun writeMotorCommand(command: PendingMotorCommand) {
         if (inFlightCommand != null) {
             queuedCommand = command
             return
@@ -228,18 +312,17 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
         }
 
         inFlightCommand = command
-        val value = command.toString().encodeToByteArray()
         val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt.writeCharacteristic(
                 characteristic,
-                value,
+                command.payload,
                 BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
             ) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             @Suppress("DEPRECATION")
-            characteristic.value = value
+            characteristic.value = command.payload
             @Suppress("DEPRECATION")
             gatt.writeCharacteristic(characteristic)
         }
@@ -259,11 +342,49 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
         }
     }
 
+    private fun enableGpsNotifications(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+    ): Boolean {
+        if (!gatt.setCharacteristicNotification(characteristic, true)) return false
+        val descriptor = characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIGURATION_UUID)
+            ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(
+                descriptor,
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
+            ) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(descriptor)
+        }
+    }
+
+    private fun handleGpsNotification(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+    ) {
+        if (characteristic.uuid != MotorBleProtocol.GPS_CHARACTERISTIC_UUID) return
+        BeltGpsPacketDecoder.decode(value)?.let(BeltGpsRepository::publish)
+    }
+
+    private fun finishConnection(message: String) {
+        mutableState.value = mutableState.value.copy(
+            status = MotorConnectionStatus.Connected,
+            deviceName = mutableState.value.deviceName ?: MotorBleProtocol.DEVICE_NAME,
+            message = message,
+        )
+    }
+
     private fun disconnectInternal(updateState: Boolean) {
         stopScanning()
         inFlightCommand = null
         queuedCommand = null
         commandCharacteristic = null
+        gpsCharacteristic = null
+        BeltGpsRepository.clear()
         bluetoothGatt?.let { gatt ->
             try {
                 gatt.disconnect()
@@ -284,6 +405,8 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
     private fun closeGatt(gatt: BluetoothGatt) {
         if (bluetoothGatt === gatt) bluetoothGatt = null
         commandCharacteristic = null
+        gpsCharacteristic = null
+        BeltGpsRepository.clear()
         gatt.close()
     }
 
@@ -296,6 +419,14 @@ class AndroidBleMotorController(context: Context) : MotorControlGateway {
     }
 
     private companion object {
+        const val LEGACY_MOTOR_INTENSITY = 128
         const val SCAN_TIMEOUT_MS = 10_000L
+        val CLIENT_CHARACTERISTIC_CONFIGURATION_UUID: UUID =
+            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 }
+
+private data class PendingMotorCommand(
+    val payload: ByteArray,
+    val intensities: List<Int>,
+)

@@ -38,6 +38,7 @@ class SportViewModel(
     private var stageBeforePause = SportStage.RunningExpanded
     private val metricsAccumulator = SportMetricsAccumulator()
     private var lastLocationUpdateMillis: Long? = null
+    private var lastBeltLocationUpdateMillis: Long? = null
     private var lastHeadingUpdateMillis: Long? = null
 
     init {
@@ -80,7 +81,8 @@ class SportViewModel(
             }
             SportUiEvent.MapMovedByUser -> update { copy(isMapFollowingUser = false) }
             is SportUiEvent.LocationPermissionChanged -> onLocationPermissionChanged(event.granted)
-            is SportUiEvent.LocationUpdated -> onLocationUpdated(event.point)
+            is SportUiEvent.LocationUpdated -> onPhoneLocationUpdated(event.point)
+            is SportUiEvent.BeltLocationUpdated -> onBeltLocationUpdated(event.point)
             is SportUiEvent.LocationFailed -> onLocationFailed(event.code, event.message)
             is SportUiEvent.HeadingUpdated -> onHeadingUpdated(event.headingDegrees)
             SportUiEvent.HeadingUnavailable -> onHeadingUnavailable()
@@ -94,12 +96,34 @@ class SportViewModel(
         }
     }
 
-    private fun onLocationUpdated(point: RoutePoint) {
+    private fun onPhoneLocationUpdated(point: RoutePoint) {
         val nowMillis = monotonicClockMillis()
+        val beltUpdate = lastBeltLocationUpdateMillis
+        if (beltUpdate != null && nowMillis - beltUpdate <= BELT_GPS_STALE_AFTER_MS) return
+        onLocationUpdated(point, LocationSourceKind.Phone, nowMillis)
+    }
+
+    private fun onBeltLocationUpdated(point: RoutePoint) {
+        val nowMillis = monotonicClockMillis()
+        lastBeltLocationUpdateMillis = nowMillis
+        onLocationUpdated(point, LocationSourceKind.Belt, nowMillis)
+    }
+
+    private fun onLocationUpdated(
+        point: RoutePoint,
+        source: LocationSourceKind,
+        nowMillis: Long,
+    ) {
         lastLocationUpdateMillis = nowMillis
         val state = mutableUiState.value
         if (state.stage !in RUNNING_STAGES) {
-            update { copy(currentLocation = point, gpsState = GpsState.from(point)) }
+            update {
+                copy(
+                    currentLocation = point,
+                    gpsState = GpsState.from(point),
+                    locationSource = source,
+                )
+            }
             return
         }
 
@@ -113,12 +137,14 @@ class SportViewModel(
             tangent = rawTangent,
             headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = point.accuracy,
-            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
+            previousGuidanceAngleDegrees =
+                state.navigationVibrationDecision.guidanceAngleDegrees,
         )
         update {
             copy(
                 currentLocation = point,
                 gpsState = GpsState.from(point),
+                locationSource = source,
                 distanceMeters = metrics.distanceMeters,
                 paceSecondsPerKilometer = metrics.paceSecondsPerKilometer,
                 routeProgress = candidate?.progress?.toFloat() ?: routeProgress,
@@ -170,7 +196,8 @@ class SportViewModel(
             tangent = tangent,
             headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = point.accuracy,
-            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
+            previousGuidanceAngleDegrees =
+                state.navigationVibrationDecision.guidanceAngleDegrees,
         )
     }
 
@@ -246,7 +273,8 @@ class SportViewModel(
             tangent = rawTangent,
             headingDegrees = freshHeadingDegrees(state, nowMillis),
             locationAccuracyMeters = state.currentLocation?.accuracy,
-            previousMotorNumber = state.navigationVibrationDecision.motorNumber,
+            previousGuidanceAngleDegrees =
+                state.navigationVibrationDecision.guidanceAngleDegrees,
         )
         update {
             copy(
@@ -382,7 +410,9 @@ class SportViewModel(
                                     navigationVibrationDecision.copy(
                                         status = NavigationVibrationStatus.AwaitingHeading,
                                         motorNumber = null,
+                                        motorIntensities = ZERO_MOTOR_INTENSITIES,
                                         relativeBearingDegrees = null,
+                                        guidanceAngleDegrees = null,
                                     )
                                 } else {
                                     navigationVibrationDecision
@@ -397,6 +427,13 @@ class SportViewModel(
     }
 
     private fun onLocationFailed(code: Int, message: String) {
+        val beltUpdate = lastBeltLocationUpdateMillis
+        if (
+            beltUpdate != null &&
+            monotonicClockMillis() - beltUpdate <= BELT_GPS_STALE_AFTER_MS
+        ) {
+            return
+        }
         lastLocationUpdateMillis = null
         update {
             copy(
@@ -434,7 +471,9 @@ class SportViewModel(
         return current.copy(
             status = NavigationVibrationStatus.UnreliableLocation,
             motorNumber = null,
+            motorIntensities = ZERO_MOTOR_INTENSITIES,
             relativeBearingDegrees = null,
+            guidanceAngleDegrees = null,
         )
     }
 
@@ -450,9 +489,11 @@ class SportViewModel(
     }
 
     companion object {
+        private val ZERO_MOTOR_INTENSITIES = List(8) { 0 }
         val RUNNING_STAGES = setOf(SportStage.RunningCollapsed, SportStage.RunningExpanded)
         const val MAX_PROGRESS_ACCURACY_METERS = 25f
         const val MIN_ROUTE_MATCH_DISTANCE_METERS = 30.0
+        const val BELT_GPS_STALE_AFTER_MS = 6_000L
 
         fun factory(context: Context): ViewModelProvider.Factory {
             return object : ViewModelProvider.Factory {

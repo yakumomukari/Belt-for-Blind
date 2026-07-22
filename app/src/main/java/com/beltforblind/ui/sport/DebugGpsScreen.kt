@@ -6,7 +6,8 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,12 +22,14 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -34,6 +37,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -45,41 +50,30 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.beltforblind.motor.BleMotorController
 import com.beltforblind.motor.MotorConnectionStatus
 import com.beltforblind.motor.MotorControlGateway
-import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
-import com.beltforblind.navigation.heading.PhoneHeadingAccuracy
-import com.beltforblind.navigation.heading.PhoneHeadingSample
-import com.beltforblind.navigation.heading.PhoneHeadingStatus
-import com.beltforblind.navigation.vibration.NavigationMotorSignalPlanner
-import com.beltforblind.navigation.vibration.NavigationVibrationPlanner
+import com.beltforblind.motor.MotorArcLayout
 import com.beltforblind.route.location.LocationSimulationProvider
 import com.beltforblind.route.location.SimulationScenario
-import com.beltforblind.route.tangent.RouteTangent
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 @Composable
 fun DebugGpsScreen(
     onOpenRecordPage: () -> Unit,
     onClose: () -> Unit,
+    motorController: MotorControlGateway,
     modifier: Modifier = Modifier,
 ) {
     val simulationState by LocationSimulationProvider.state.collectAsState()
     var selectedScenario by remember { mutableStateOf(simulationState.scenario) }
-    val context = LocalContext.current
-    val motorController = remember(context) { BleMotorController(context.applicationContext) }
-
-    DisposableEffect(motorController) {
-        onDispose { motorController.close() }
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -158,22 +152,13 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     val context = LocalContext.current
     val state by controller.state.collectAsState()
     var permissionMessage by remember { mutableStateOf<String?>(null) }
-    var northTestEnabled by remember { mutableStateOf(false) }
-    var headingSample by remember { mutableStateOf(PhoneHeadingSample()) }
     var manualMotorJob by remember { mutableStateOf<Job?>(null) }
+    var requestedIntensities by remember {
+        mutableStateOf(List(MotorArcLayout.MOTOR_COUNT) { 0 })
+    }
+    var selectedRelativeAngle by remember { mutableStateOf<Double?>(null) }
+    var maximumIntensity by remember { mutableFloatStateOf(DEFAULT_MAXIMUM_INTENSITY.toFloat()) }
     val coroutineScope = rememberCoroutineScope()
-    val headingProvider = remember(context) {
-        AndroidPhoneHeadingProvider(context.applicationContext) { sample ->
-            headingSample = sample
-        }
-    }
-    val northDecision = headingSample.headingDegrees?.let { heading ->
-        NavigationVibrationPlanner.plan(
-            tangent = NORTH_ROUTE_TANGENT,
-            headingDegrees = heading,
-            locationAccuracyMeters = NORTH_TEST_ACCURACY_METERS,
-        )
-    }
     val requiredPermissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
@@ -202,53 +187,46 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
             permissionLauncher.launch(missingPermissions.toTypedArray())
         }
     }
+    val stopManualControl = {
+        manualMotorJob?.cancel()
+        manualMotorJob = null
+        selectedRelativeAngle = null
+        requestedIntensities = List(MotorArcLayout.MOTOR_COUNT) { 0 }
+        controller.stopMotor()
+    }
+    val startManualControl: (Double) -> Unit = { relativeAngle ->
+        val intensities = MotorArcLayout.intensitiesForRelativeAngle(
+            relativeAngleDegrees = relativeAngle,
+            maximumIntensity = maximumIntensity.roundToInt(),
+        )
+        selectedRelativeAngle = relativeAngle
+        requestedIntensities = intensities
+        manualMotorJob?.cancel()
+        manualMotorJob = coroutineScope.launch {
+            while (isActive) {
+                controller.setMotorIntensities(intensities)
+                delay(MOTOR_VECTOR_REFRESH_MILLIS)
+            }
+        }
+    }
 
-    DisposableEffect(headingProvider, northTestEnabled) {
-        if (northTestEnabled) headingProvider.start()
+    DisposableEffect(controller) {
         onDispose {
-            if (northTestEnabled) headingProvider.stop()
+            manualMotorJob?.cancel()
+            controller.stopMotor()
         }
     }
-
     LaunchedEffect(state.isConnected) {
-        if (!state.isConnected && northTestEnabled) {
-            northTestEnabled = false
-        }
-    }
-
-    val northSignalPattern = remember(northDecision, northTestEnabled, state.isConnected) {
-        northDecision?.let { decision ->
-            NavigationMotorSignalPlanner.patternFor(
-                decision = decision,
-                enabled = northTestEnabled && state.isConnected,
-            )
-        }
-    }
-    LaunchedEffect(northSignalPattern, northTestEnabled, state.isConnected) {
-        if (!northTestEnabled || !state.isConnected) {
-            return@LaunchedEffect
-        }
-
-        val pattern = northSignalPattern
-        if (pattern == null) {
-            controller.stopMotor()
-            return@LaunchedEffect
-        }
-        try {
-            do {
-                pattern.frames.forEach { frame ->
-                    frame.motorNumber?.let(controller::activateMotor)
-                        ?: controller.stopMotor()
-                    delay(frame.durationMillis)
-                }
-            } while (pattern.repeats)
-        } finally {
-            controller.stopMotor()
+        if (!state.isConnected) {
+            manualMotorJob?.cancel()
+            manualMotorJob = null
+            selectedRelativeAngle = null
+            requestedIntensities = List(MotorArcLayout.MOTOR_COUNT) { 0 }
         }
     }
 
     Text("腰带电机测试", style = MaterialTheme.typography.titleLarge)
-    Text("连接后点击轮盘外圈触发单个电机短振，点击中心 STOP 停止全部电机。")
+    Text("以正前方为对称轴，1 至 8 号电机从左向右排列。按住或沿圆弧拖动，相邻电机会按角度连续分配强度；松手立即停止。")
     Text(
         text = "连接状态：${state.status.displayName()}",
         style = MaterialTheme.typography.titleMedium,
@@ -281,62 +259,50 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
     }
 
     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-    Text("正北路线自动测试", style = MaterialTheme.typography.titleLarge)
-    Text("固定路线方向为北方。手机需竖直放在人体正前方，屏幕朝向身体、背面朝外。")
+    Text("前侧控制圆弧", style = MaterialTheme.typography.titleLarge)
     Text(
-        text = "朝向状态：${headingSample.status.displayName()}",
+        "最大强度：${maximumIntensity.roundToInt()} / 255（${(maximumIntensity / 255f * 100).roundToInt()}%）",
         style = MaterialTheme.typography.titleMedium,
     )
-    headingSample.headingDegrees?.let { heading ->
-        Text("人体朝向：%.1f°（磁北基准）".format(heading))
-        Text("传感器精度：${headingSample.accuracy.displayName()}")
-    }
-    Text(
-        text = northDecision?.motorNumber?.let { motor ->
-            "正北引导建议：$motor 号电机"
-        } ?: "正北引导建议：停止",
-        style = MaterialTheme.typography.titleMedium,
+    Slider(
+        value = maximumIntensity,
+        onValueChange = { maximumIntensity = it },
+        valueRange = MINIMUM_SELECTABLE_INTENSITY.toFloat()..255f,
+        steps = 18,
+        enabled = state.isConnected,
+        modifier = Modifier.fillMaxWidth(),
     )
-    Text("预期：面北→1号，面东→7号，面南→5号，面西→3号。")
-    Button(
-        onClick = {
-            manualMotorJob?.cancel()
-            manualMotorJob = null
-            if (northTestEnabled) {
-                northTestEnabled = false
-                controller.stopMotor()
-            } else {
-                controller.stopMotor()
-                northTestEnabled = true
-            }
-        },
+    MotorArcControl(
+        motorIntensities = requestedIntensities,
+        enabled = state.isConnected,
+        onRelativeAngleChanged = startManualControl,
+        onInteractionEnd = stopManualControl,
+    )
+    OutlinedButton(
+        onClick = stopManualControl,
         enabled = state.isConnected,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(if (northTestEnabled) "停止正北自动测试" else "启动正北自动测试")
+        Text("立即停止全部电机")
     }
-
-    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-    Text("手动轮盘", style = MaterialTheme.typography.titleLarge)
-    MotorWheel(
-        selectedMotor = state.selectedMotor,
-        enabled = state.isConnected && !northTestEnabled,
-        onMotorSelected = { motorNumber ->
-            manualMotorJob?.cancel()
-            manualMotorJob = coroutineScope.launch {
-                controller.activateMotor(motorNumber)
-                delay(MANUAL_MOTOR_PULSE_MILLIS)
-                controller.stopMotor()
-            }
-        },
-        onStop = {
-            manualMotorJob?.cancel()
-            manualMotorJob = null
-            controller.stopMotor()
-        },
-    )
     Text(
-        text = state.selectedMotor?.let { "当前电机：$it" } ?: "当前电机：全部停止",
+        text = selectedRelativeAngle?.let { angle ->
+            "目标方向：${if (angle < 0) "左" else if (angle > 0) "右" else "正前方"} " +
+                "${kotlin.math.abs(angle).toInt()}°"
+        } ?: "目标方向：未控制",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    val confirmedOutputs = state.motorIntensities.mapIndexedNotNull { index, intensity ->
+        intensity.takeIf { it > 0 }?.let {
+            "${index + 1}号 ${(it / 255f * 100).roundToInt()}%"
+        }
+    }
+    Text(
+        text = if (confirmedOutputs.isEmpty()) {
+            "实际输出：全部停止"
+        } else {
+            "实际输出：${confirmedOutputs.joinToString("，")}"
+        },
         style = MaterialTheme.typography.titleMedium,
     )
     Text(
@@ -346,96 +312,205 @@ private fun MotorDebugPanel(controller: MotorControlGateway) {
 }
 
 @Composable
-private fun MotorWheel(
-    selectedMotor: Int?,
+private fun MotorArcControl(
+    motorIntensities: List<Int>,
     enabled: Boolean,
-    onMotorSelected: (Int) -> Unit,
-    onStop: () -> Unit,
+    onRelativeAngleChanged: (Double) -> Unit,
+    onInteractionEnd: () -> Unit,
 ) {
+    val outlineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
+    val disabledColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    val labelColor = MaterialTheme.colorScheme.onSurface
     val selectedColor = MaterialTheme.colorScheme.primary
-    val normalColor = MaterialTheme.colorScheme.surfaceVariant
-    val disabledColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-    val dividerColor = MaterialTheme.colorScheme.outline
-    val selectedTextColor = MaterialTheme.colorScheme.onPrimary
-    val normalTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val stopColor = if (enabled) MaterialTheme.colorScheme.error else disabledColor
-    val stopTextColor = if (enabled) MaterialTheme.colorScheme.onError else normalTextColor
+    val selectedNodeColor = MaterialTheme.colorScheme.onPrimary
+    val nodeColor = MaterialTheme.colorScheme.surface
+    val gradientColors = listOf(
+        androidx.compose.ui.graphics.Color(0xFF1687B8),
+        androidx.compose.ui.graphics.Color(0xFF5D5ADB),
+        androidx.compose.ui.graphics.Color(0xFF9B3FA3),
+    )
 
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(1f)
-            .padding(12.dp)
+            .aspectRatio(1.45f)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
             .semantics {
                 contentDescription = if (enabled) {
-                    "电机控制轮盘，当前${selectedMotor?.let { "$it 号电机" } ?: "全部停止"}"
+                    val activeMotors = motorIntensities.mapIndexedNotNull { index, intensity ->
+                        intensity.takeIf { it > 0 }?.let { "${index + 1}号$it" }
+                    }
+                    "前侧电机控制圆弧，当前${activeMotors.joinToString("，").ifEmpty { "全部停止" }}"
                 } else {
-                    "电机控制轮盘未启用"
+                    "前侧电机控制圆弧未启用"
                 }
             }
             .pointerInput(enabled) {
-                detectTapGestures { position ->
-                    if (!enabled) return@detectTapGestures
-                    val center = Offset(size.width / 2f, size.height / 2f)
-                    val delta = position - center
-                    val distance = delta.getDistance()
-                    val radius = minOf(size.width, size.height) / 2f
-                    when {
-                        distance <= radius * STOP_RADIUS_RATIO -> onStop()
-                        distance <= radius -> {
-                            val angle = Math.toDegrees(atan2(delta.y, delta.x).toDouble())
-                            val clockwiseFromTop = (angle + 90.0 + 360.0) % 360.0
-                            val motor = ((clockwiseFromTop + 22.5) / 45.0).toInt() % 8 + 1
-                            onMotorSelected(motor)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (!enabled) return@awaitEachGesture
+
+                    val touchWidth = 72.dp.toPx()
+                    var controlling = false
+                    var lastAngle: Double? = null
+                    try {
+                        relativeAngleForArcPosition(
+                            position = down.position,
+                            width = size.width.toFloat(),
+                            height = size.height.toFloat(),
+                            touchWidth = touchWidth,
+                        )?.let { angle ->
+                            controlling = true
+                            lastAngle = angle
+                            onRelativeAngleChanged(angle)
                         }
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val angle = relativeAngleForArcPosition(
+                                position = change.position,
+                                width = size.width.toFloat(),
+                                height = size.height.toFloat(),
+                                touchWidth = touchWidth,
+                            )
+                            if (angle == null) {
+                                if (controlling) {
+                                    controlling = false
+                                    lastAngle = null
+                                    onInteractionEnd()
+                                }
+                            } else if (
+                                    lastAngle == null ||
+                                        kotlin.math.abs(angle - lastAngle!!) >= ARC_UPDATE_STEP_DEGREES
+                            ) {
+                                controlling = true
+                                lastAngle = angle
+                                onRelativeAngleChanged(angle)
+                            }
+                            change.consume()
+                        }
+                    } finally {
+                        if (controlling) onInteractionEnd()
                     }
                 }
             },
     ) {
-        val radius = size.minDimension / 2f
-        val topLeft = Offset(center.x - radius, center.y - radius)
-        val wheelSize = Size(radius * 2f, radius * 2f)
+        val arcCenter = Offset(size.width / 2f, size.height * ARC_CENTER_Y_RATIO)
+        val radius = minOf(size.width * ARC_RADIUS_WIDTH_RATIO, size.height * ARC_RADIUS_HEIGHT_RATIO)
+        val topLeft = Offset(arcCenter.x - radius, arcCenter.y - radius)
+        val arcSize = Size(radius * 2f, radius * 2f)
+        val startAngle = ARC_FORWARD_CANVAS_DEGREES.toFloat() +
+            MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES.toFloat()
+        val sweepAngle = (
+            MotorArcLayout.MAX_RELATIVE_ANGLE_DEGREES -
+                MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES
+            ).toFloat()
+
+        drawArc(
+            color = outlineColor,
+            startAngle = startAngle,
+            sweepAngle = sweepAngle,
+            useCenter = false,
+            topLeft = topLeft,
+            size = arcSize,
+            style = Stroke(width = 52.dp.toPx(), cap = StrokeCap.Round),
+        )
+        if (enabled) {
+            drawArc(
+                brush = Brush.horizontalGradient(
+                    colors = gradientColors,
+                    startX = arcCenter.x - radius,
+                    endX = arcCenter.x + radius,
+                ),
+                startAngle = startAngle,
+                sweepAngle = sweepAngle,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = 38.dp.toPx(), cap = StrokeCap.Round),
+            )
+        } else {
+            drawArc(
+                color = disabledColor,
+                startAngle = startAngle,
+                sweepAngle = sweepAngle,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = 38.dp.toPx(), cap = StrokeCap.Round),
+            )
+        }
+
         val numberPaint = android.graphics.Paint().apply {
             isAntiAlias = true
+            color = labelColor.toArgb()
             textAlign = android.graphics.Paint.Align.CENTER
-            textSize = 22.sp.toPx()
+            textSize = 16.sp.toPx()
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val frontPaint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            color = labelColor.toArgb()
+            textAlign = android.graphics.Paint.Align.CENTER
+            textSize = 15.sp.toPx()
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val intensityPaint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            color = selectedColor.toArgb()
+            textAlign = android.graphics.Paint.Align.CENTER
+            textSize = 11.sp.toPx()
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
 
-        repeat(8) { index ->
+        MotorArcLayout.relativeAnglesDegrees.forEachIndexed { index, relativeAngle ->
             val motorNumber = index + 1
-            drawArc(
-                color = when {
-                    !enabled -> disabledColor
-                    selectedMotor == motorNumber -> selectedColor
-                    else -> normalColor
+            val intensity = motorIntensities.getOrElse(index) { 0 }
+            val intensityRatio = intensity / 255f
+            val radians = (
+                ARC_FORWARD_CANVAS_DEGREES + relativeAngle
+                ) * PI / 180.0
+            val direction = Offset(cos(radians).toFloat(), sin(radians).toFloat())
+            val node = arcCenter + direction * radius
+            val isSelected = enabled && intensity > 0
+
+            if (isSelected) {
+                drawArc(
+                    color = selectedColor.copy(alpha = 0.12f + intensityRatio * 0.28f),
+                    startAngle = (
+                        ARC_FORWARD_CANVAS_DEGREES + relativeAngle -
+                            ARC_SELECTED_HALF_SWEEP_DEGREES
+                        ).toFloat(),
+                    sweepAngle = (ARC_SELECTED_HALF_SWEEP_DEGREES * 2).toFloat(),
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = 62.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawCircle(
+                    color = selectedColor.copy(alpha = 0.12f + intensityRatio * 0.20f),
+                    radius = (20 + intensityRatio * 10).dp.toPx(),
+                    center = node,
+                )
+            }
+            drawCircle(
+                color = if (isSelected) {
+                    selectedNodeColor
+                } else {
+                    nodeColor
                 },
-                startAngle = -112.5f + index * 45f,
-                sweepAngle = 45f,
-                useCenter = true,
-                topLeft = topLeft,
-                size = wheelSize,
+                radius = if (isSelected) 12.dp.toPx() else 9.dp.toPx(),
+                center = node,
             )
-            drawArc(
-                color = dividerColor,
-                startAngle = -112.5f + index * 45f,
-                sweepAngle = 45f,
-                useCenter = true,
-                topLeft = topLeft,
-                size = wheelSize,
-                style = Stroke(width = 1.dp.toPx()),
+            drawCircle(
+                color = if (isSelected) selectedColor else outlineColor,
+                radius = if (isSelected) 7.dp.toPx() else 5.dp.toPx(),
+                center = node,
             )
 
-            val labelAngle = (-90.0 + index * 45.0) * PI / 180.0
-            val labelCenter = Offset(
-                x = center.x + cos(labelAngle).toFloat() * radius * 0.68f,
-                y = center.y + sin(labelAngle).toFloat() * radius * 0.68f,
-            )
-            numberPaint.color = if (enabled && selectedMotor == motorNumber) {
-                selectedTextColor.toArgb()
-            } else {
-                normalTextColor.toArgb()
-            }
+            val labelCenter = arcCenter + direction * (radius + 31.dp.toPx())
             drawIntoCanvas { canvas ->
                 canvas.nativeCanvas.drawText(
                     motorNumber.toString(),
@@ -443,26 +518,56 @@ private fun MotorWheel(
                     labelCenter.y - (numberPaint.ascent() + numberPaint.descent()) / 2f,
                     numberPaint,
                 )
+                if (intensity > 0) {
+                    canvas.nativeCanvas.drawText(
+                        "${(intensityRatio * 100).roundToInt()}%",
+                        labelCenter.x,
+                        labelCenter.y + 16.sp.toPx(),
+                        intensityPaint,
+                    )
+                }
             }
         }
 
-        drawCircle(color = stopColor, radius = radius * STOP_RADIUS_RATIO)
-        val stopPaint = android.graphics.Paint().apply {
-            isAntiAlias = true
-            color = stopTextColor.toArgb()
-            textAlign = android.graphics.Paint.Align.CENTER
-            textSize = 20.sp.toPx()
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-        }
+        val forwardNode = Offset(arcCenter.x, arcCenter.y - radius)
+        drawLine(
+            color = selectedColor.copy(alpha = 0.55f),
+            start = Offset(forwardNode.x, forwardNode.y - 18.dp.toPx()),
+            end = Offset(forwardNode.x, forwardNode.y + 18.dp.toPx()),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
         drawIntoCanvas { canvas ->
             canvas.nativeCanvas.drawText(
-                "STOP",
-                center.x,
-                center.y - (stopPaint.ascent() + stopPaint.descent()) / 2f,
-                stopPaint,
+                "正前方",
+                forwardNode.x,
+                forwardNode.y - 28.dp.toPx(),
+                frontPaint,
             )
         }
     }
+}
+
+private fun relativeAngleForArcPosition(
+    position: Offset,
+    width: Float,
+    height: Float,
+    touchWidth: Float,
+): Double? {
+    val center = Offset(width / 2f, height * ARC_CENTER_Y_RATIO)
+    val radius = minOf(width * ARC_RADIUS_WIDTH_RATIO, height * ARC_RADIUS_HEIGHT_RATIO)
+    val delta = position - center
+    if (kotlin.math.abs(delta.getDistance() - radius) > touchWidth / 2f) return null
+
+    val canvasAngle = Math.toDegrees(atan2(delta.y, delta.x).toDouble())
+    var relativeAngle = canvasAngle - ARC_FORWARD_CANVAS_DEGREES
+    while (relativeAngle > 180.0) relativeAngle -= 360.0
+    while (relativeAngle <= -180.0) relativeAngle += 360.0
+    if (relativeAngle !in ARC_TOUCH_MIN_DEGREES..ARC_TOUCH_MAX_DEGREES) return null
+    return relativeAngle.coerceIn(
+        MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES,
+        MotorArcLayout.MAX_RELATIVE_ANGLE_DEGREES,
+    )
 }
 
 private fun MotorConnectionStatus.displayName(): String {
@@ -472,25 +577,6 @@ private fun MotorConnectionStatus.displayName(): String {
         MotorConnectionStatus.Connecting -> "连接中"
         MotorConnectionStatus.Connected -> "已连接"
         MotorConnectionStatus.Error -> "错误"
-    }
-}
-
-private fun PhoneHeadingStatus.displayName(): String {
-    return when (this) {
-        PhoneHeadingStatus.Stopped -> "未启动"
-        PhoneHeadingStatus.Available -> "可用"
-        PhoneHeadingStatus.SensorUnavailable -> "手机不支持旋转矢量传感器"
-        PhoneHeadingStatus.Unreliable -> "传感器不可靠，电机已停止"
-        PhoneHeadingStatus.InvalidOrientation -> "手机姿态不符合要求，电机已停止"
-    }
-}
-
-private fun PhoneHeadingAccuracy.displayName(): String {
-    return when (this) {
-        PhoneHeadingAccuracy.Unknown -> "未知"
-        PhoneHeadingAccuracy.Low -> "低"
-        PhoneHeadingAccuracy.Medium -> "中"
-        PhoneHeadingAccuracy.High -> "高"
     }
 }
 
@@ -510,16 +596,14 @@ private fun SimulationScenario.description(): String {
     }
 }
 
-private const val STOP_RADIUS_RATIO = 0.27f
-private const val NORTH_TEST_ACCURACY_METERS = 3f
-private const val MANUAL_MOTOR_PULSE_MILLIS = 500L
-
-private val NORTH_ROUTE_TANGENT = RouteTangent(
-    segmentStartIndex = 0,
-    segmentEndIndex = 1,
-    projectionRatio = 0.5,
-    tangentBearingDegrees = 0.0,
-    distanceToRouteMeters = 0.0,
-    alongRouteDistanceMeters = 50.0,
-    totalRouteDistanceMeters = 100.0,
-)
+private const val ARC_FORWARD_CANVAS_DEGREES = -90.0
+private const val ARC_TOUCH_MIN_DEGREES = -88.0
+private const val ARC_TOUCH_MAX_DEGREES = 88.0
+private const val ARC_SELECTED_HALF_SWEEP_DEGREES = 8.0
+private const val ARC_CENTER_Y_RATIO = 0.94f
+private const val ARC_RADIUS_WIDTH_RATIO = 0.40f
+private const val ARC_RADIUS_HEIGHT_RATIO = 0.70f
+private const val ARC_UPDATE_STEP_DEGREES = 0.5
+private const val MOTOR_VECTOR_REFRESH_MILLIS = 300L
+private const val MINIMUM_SELECTABLE_INTENSITY = 64
+private const val DEFAULT_MAXIMUM_INTENSITY = 128

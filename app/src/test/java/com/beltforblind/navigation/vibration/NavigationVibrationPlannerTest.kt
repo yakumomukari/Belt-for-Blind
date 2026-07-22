@@ -7,57 +7,66 @@ import org.junit.Test
 
 class NavigationVibrationPlannerTest {
     @Test
-    fun mapsClockwiseDirectionsToExistingMotorWheel() {
-        assertEquals(1, NavigationVibrationPlanner.motorForRelativeBearing(0.0))
-        assertEquals(2, NavigationVibrationPlanner.motorForRelativeBearing(45.0))
-        assertEquals(3, NavigationVibrationPlanner.motorForRelativeBearing(90.0))
-        assertEquals(5, NavigationVibrationPlanner.motorForRelativeBearing(180.0))
-        assertEquals(7, NavigationVibrationPlanner.motorForRelativeBearing(-90.0))
-        assertEquals(8, NavigationVibrationPlanner.motorForRelativeBearing(-45.0))
+    fun mapsFrontDirectionToTwoCentralMotors() {
+        val decision = plan(targetBearing = 0.0, heading = 0.0)
+
+        assertEquals(0.0, decision.guidanceAngleDegrees!!, 0.001)
+        assertEquals(listOf(0, 0, 0, 64, 64, 0, 0, 0), decision.motorIntensities)
     }
 
     @Test
-    fun handlesNorthWrapAroundWithoutChangingMotor() {
-        val decision = plan(targetBearing = 10.0, heading = 350.0)
+    fun interpolatesStrengthBetweenAdjacentMotors() {
+        val decision = plan(targetBearing = 20.0, heading = 0.0)
 
-        assertEquals(NavigationVibrationStatus.Guiding, decision.status)
-        assertEquals(1, decision.motorNumber)
         assertEquals(20.0, decision.relativeBearingDegrees!!, 0.001)
+        assertEquals(listOf(0, 0, 0, 0, 76, 52, 0, 0), decision.motorIntensities)
+        assertEquals(5, decision.motorNumber)
     }
 
     @Test
-    fun mapsDirectionAcrossSectorBoundary() {
-        val decision = plan(targetBearing = 23.0, heading = 0.0)
-
-        assertEquals(2, decision.motorNumber)
+    fun clampsDirectionsOutsideFrontArcToEndMotors() {
+        assertEquals(
+            listOf(128, 0, 0, 0, 0, 0, 0, 0),
+            plan(targetBearing = 270.0, heading = 0.0).motorIntensities,
+        )
+        assertEquals(
+            listOf(0, 0, 0, 0, 0, 0, 0, 128),
+            plan(targetBearing = 90.0, heading = 0.0).motorIntensities,
+        )
     }
 
     @Test
-    fun keepsPreviousMotorInsideHysteresisMargin() {
-        val decision = NavigationVibrationPlanner.plan(
-            tangent = tangent(targetBearing = 28.0),
-            headingDegrees = 0.0,
-            locationAccuracyMeters = 3f,
-            previousMotorNumber = 1,
+    fun keepsPreviousAngleInsideThreeDegreeDeadband() {
+        val angle = NavigationVibrationPlanner.stableGuidanceAngle(
+            relativeBearingDegrees = 12.0,
+            previousGuidanceAngleDegrees = 10.0,
         )
 
-        assertEquals(1, decision.motorNumber)
+        assertEquals(10.0, angle, 0.001)
     }
 
     @Test
-    fun switchesMotorAfterLeavingHysteresisMargin() {
-        val decision = NavigationVibrationPlanner.plan(
-            tangent = tangent(targetBearing = 31.0),
-            headingDegrees = 0.0,
-            locationAccuracyMeters = 3f,
-            previousMotorNumber = 1,
+    fun updatesAngleAfterLeavingDeadband() {
+        val angle = NavigationVibrationPlanner.stableGuidanceAngle(
+            relativeBearingDegrees = 14.0,
+            previousGuidanceAngleDegrees = 10.0,
         )
 
-        assertEquals(2, decision.motorNumber)
+        assertEquals(14.0, angle, 0.001)
     }
 
     @Test
-    fun suppressesMotorWhenLocationIsUnreliable() {
+    fun keepsPreviousTurnSideAcrossRearBearingWrap() {
+        val angle = NavigationVibrationPlanner.stableGuidanceAngle(
+            relativeBearingDegrees = -179.0,
+            previousGuidanceAngleDegrees = 77.0,
+        )
+
+        assertEquals(77.0, angle, 0.001)
+    }
+
+    @Test
+    fun suppressesMotorsWhenLocationIsUnreliable() {
         val decision = NavigationVibrationPlanner.plan(
             tangent = tangent(),
             headingDegrees = 0.0,
@@ -66,35 +75,31 @@ class NavigationVibrationPlannerTest {
 
         assertEquals(NavigationVibrationStatus.UnreliableLocation, decision.status)
         assertNull(decision.motorNumber)
+        assertEquals(List(8) { 0 }, decision.motorIntensities)
     }
 
     @Test
-    fun suppressesMotorWhenUserIsOffRoute() {
-        val decision = NavigationVibrationPlanner.plan(
+    fun reportsOffRouteAndArrivalWithoutDirectionOutput() {
+        val offRoute = NavigationVibrationPlanner.plan(
             tangent = tangent(distanceToRoute = 40.0),
             headingDegrees = 0.0,
             locationAccuracyMeters = 3f,
         )
-
-        assertEquals(NavigationVibrationStatus.OffRoute, decision.status)
-        assertNull(decision.motorNumber)
-    }
-
-    @Test
-    fun reportsArrivalNearRouteEnd() {
-        val decision = NavigationVibrationPlanner.plan(
+        val arrived = NavigationVibrationPlanner.plan(
             tangent = tangent(alongRouteDistance = 995.0),
             headingDegrees = 0.0,
             locationAccuracyMeters = 3f,
         )
 
-        assertEquals(NavigationVibrationStatus.Arrived, decision.status)
-        assertNull(decision.motorNumber)
-        assertEquals(5.0, decision.remainingDistanceMeters!!, 0.001)
+        assertEquals(NavigationVibrationStatus.OffRoute, offRoute.status)
+        assertEquals(List(8) { 0 }, offRoute.motorIntensities)
+        assertEquals(NavigationVibrationStatus.Arrived, arrived.status)
+        assertEquals(5.0, arrived.remainingDistanceMeters!!, 0.001)
+        assertEquals(List(8) { 0 }, arrived.motorIntensities)
     }
 
     @Test
-    fun waitsForHeadingBeforeSelectingMotor() {
+    fun waitsForHeadingBeforeSelectingMotors() {
         val decision = NavigationVibrationPlanner.plan(
             tangent = tangent(),
             headingDegrees = null,
@@ -103,21 +108,32 @@ class NavigationVibrationPlannerTest {
 
         assertEquals(NavigationVibrationStatus.AwaitingHeading, decision.status)
         assertNull(decision.motorNumber)
+        assertEquals(List(8) { 0 }, decision.motorIntensities)
     }
 
     @Test
-    fun selectsExpectedMotorForNorthRouteAtCardinalBodyHeadings() {
-        assertEquals(1, plan(targetBearing = 0.0, heading = 0.0).motorNumber)
-        assertEquals(7, plan(targetBearing = 0.0, heading = 90.0).motorNumber)
-        assertEquals(5, plan(targetBearing = 0.0, heading = 180.0).motorNumber)
-        assertEquals(3, plan(targetBearing = 0.0, heading = 270.0).motorNumber)
+    fun selectsExpectedArcSideForNorthRouteAtCardinalHeadings() {
+        assertEquals(listOf(4, 5), activeMotors(plan(0.0, 0.0)))
+        assertEquals(listOf(1), activeMotors(plan(0.0, 90.0)))
+        assertEquals(listOf(1), activeMotors(plan(0.0, 180.0)))
+        assertEquals(listOf(8), activeMotors(plan(0.0, 270.0)))
     }
 
-    private fun plan(targetBearing: Double, heading: Double): NavigationVibrationDecision {
+    private fun activeMotors(decision: NavigationVibrationDecision): List<Int> =
+        decision.motorIntensities.mapIndexedNotNull { index, intensity ->
+            (index + 1).takeIf { intensity > 0 }
+        }
+
+    private fun plan(
+        targetBearing: Double,
+        heading: Double,
+        previousGuidanceAngle: Double? = null,
+    ): NavigationVibrationDecision {
         return NavigationVibrationPlanner.plan(
             tangent = tangent(targetBearing = targetBearing),
             headingDegrees = heading,
             locationAccuracyMeters = 3f,
+            previousGuidanceAngleDegrees = previousGuidanceAngle,
         )
     }
 

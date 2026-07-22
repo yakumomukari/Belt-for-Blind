@@ -83,14 +83,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.beltforblind.motor.BleMotorController
 import com.beltforblind.motor.MotorConnectionStatus
+import com.beltforblind.motor.MotorControlGateway
 import com.beltforblind.navigation.heading.AndroidPhoneHeadingProvider
 import com.beltforblind.navigation.heading.PhoneBackHeadingCalculator
 import com.beltforblind.navigation.heading.PhoneHeadingSample
 import com.beltforblind.navigation.heading.PhoneHeadingStatus
 import com.beltforblind.navigation.vibration.NavigationMotorSignalPlanner
 import com.beltforblind.navigation.vibration.NavigationVibrationStatus
+import com.beltforblind.route.location.BeltGpsRoutePointMapper
+import com.beltforblind.route.location.BeltPreferredLocationDataSource
 import com.beltforblind.sport.background.SportBackgroundLock
 import com.beltforblind.ui.components.AppHeaderCard
 import com.beltforblind.ui.components.StatusChip
@@ -106,6 +108,7 @@ import java.util.Locale
 @Composable
 fun SportScreen(
     onOpenRecordPage: () -> Unit,
+    motorController: MotorControlGateway,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -114,8 +117,8 @@ fun SportScreen(
     )
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val motorController = remember(context) { BleMotorController(context.applicationContext) }
     val motorState by motorController.state.collectAsState()
+    val beltGpsSample by motorController.gpsSample.collectAsState()
     var headingSample by remember { mutableStateOf(PhoneHeadingSample()) }
     val headingProvider = remember(context) {
         AndroidPhoneHeadingProvider(context.applicationContext) { sample ->
@@ -175,10 +178,9 @@ fun SportScreen(
         SportStage.RunningExpanded,
     )
 
-    DisposableEffect(motorController, headingProvider) {
+    DisposableEffect(headingProvider) {
         onDispose {
             headingProvider.stop()
-            motorController.close()
             SportBackgroundLock.stop(context)
         }
     }
@@ -194,6 +196,17 @@ fun SportScreen(
         viewModel.onEvent(
             SportUiEvent.BeltConnectionChanged(motorState.status.toBeltConnectionState()),
         )
+    }
+
+    LaunchedEffect(beltGpsSample?.sequence, beltGpsSample?.receivedAtMillis) {
+        val sample = beltGpsSample ?: return@LaunchedEffect
+        val ageMillis = System.currentTimeMillis() - sample.receivedAtMillis
+        if (ageMillis !in 0..BeltPreferredLocationDataSource.BELT_GPS_STALE_AFTER_MS) {
+            return@LaunchedEffect
+        }
+        BeltGpsRoutePointMapper.toRoutePoint(sample)?.let { point ->
+            viewModel.onEvent(SportUiEvent.BeltLocationUpdated(point))
+        }
     }
 
     LaunchedEffect(isActivelyRunning, motorState.status) {
@@ -280,15 +293,18 @@ fun SportScreen(
     ) {
         if (!motorState.isConnected) return@LaunchedEffect
         if (motorSignalPattern == null) {
-            if (motorState.selectedMotor != null) motorController.stopMotor()
+            if (motorState.motorIntensities.any { it > 0 }) motorController.stopMotor()
             return@LaunchedEffect
         }
 
         try {
             do {
                 motorSignalPattern.frames.forEach { frame ->
-                    frame.motorNumber?.let(motorController::activateMotor)
-                        ?: motorController.stopMotor()
+                    if (frame.isStopped) {
+                        motorController.stopMotor()
+                    } else {
+                        motorController.setMotorIntensities(frame.motorIntensities)
+                    }
                     delay(frame.durationMillis)
                 }
             } while (motorSignalPattern.repeats)
@@ -644,6 +660,7 @@ private fun SportMapLayer(
         route = state.selectedRoute,
         routeTangent = state.routeTangent,
         currentLocation = state.currentLocation,
+        locationSourceKind = state.locationSource,
         locationPermissionGranted = state.locationPermissionGranted,
         followUser = state.isMapFollowingUser,
         recenterRequestId = state.recenterRequestId,
@@ -672,6 +689,7 @@ private fun SportTopBar(
     ) {
         GpsStatusMenu(
             gpsState = state.gpsState,
+            locationSource = state.locationSource,
             expanded = state.isGpsStatusVisible,
             onClick = onGpsClick,
             onDismiss = onGpsDismiss,
@@ -679,7 +697,7 @@ private fun SportTopBar(
         if (onBeltClick != null) {
             BeltStatusChip(
                 connectionState = state.beltConnectionState,
-                motorNumber = state.navigationVibrationDecision.motorNumber,
+                motorIntensities = state.navigationVibrationDecision.motorIntensities,
                 onClick = onBeltClick,
             )
         }
@@ -689,12 +707,15 @@ private fun SportTopBar(
 @Composable
 private fun BeltStatusChip(
     connectionState: BeltConnectionState,
-    motorNumber: Int?,
+    motorIntensities: List<Int>,
     onClick: (() -> Unit)?,
 ) {
     val connected = connectionState == BeltConnectionState.Connected
-    val label = if (connected && motorNumber != null) {
-        "${connectionState.label} · ${motorNumber}号"
+    val activeMotors = motorIntensities.mapIndexedNotNull { index, intensity ->
+        (index + 1).takeIf { intensity > 0 }
+    }
+    val label = if (connected && activeMotors.isNotEmpty()) {
+        "${connectionState.label} · ${activeMotors.joinToString("+")}号"
     } else {
         connectionState.label
     }
@@ -719,6 +740,7 @@ private fun BeltStatusChip(
 @Composable
 private fun GpsStatusMenu(
     gpsState: GpsState,
+    locationSource: LocationSourceKind,
     expanded: Boolean,
     onClick: () -> Unit,
     onDismiss: () -> Unit,
@@ -753,6 +775,13 @@ private fun GpsStatusMenu(
             ) {
                 Text("GPS ${gpsState.quality.label}", fontWeight = FontWeight.Bold)
                 Text(gpsState.formattedAccuracy())
+                Text(
+                    if (locationSource == LocationSourceKind.Belt) {
+                        "定位来源：腰带 GPS"
+                    } else {
+                        "定位来源：手机 GPS"
+                    },
+                )
                 Text(gpsState.signalBars(), color = statusColor)
             }
         }
@@ -1072,7 +1101,13 @@ private fun SportUiState.navigationStatusText(): String {
     val progress = (routeProgress * 100).toInt()
     return when (navigationVibrationDecision.status) {
         NavigationVibrationStatus.Guiding -> {
-            "方向引导中 · ${navigationVibrationDecision.motorNumber ?: "-"}号电机 · ${progress}%"
+            val activeMotors = navigationVibrationDecision.motorIntensities
+                .mapIndexedNotNull { index, intensity ->
+                    (index + 1).takeIf { intensity > 0 }
+                }
+                .joinToString("+")
+                .ifEmpty { "-" }
+            "方向引导中 · $activeMotors 号电机 · ${progress}%"
         }
         NavigationVibrationStatus.OffRoute -> "已偏离路线 · 左右双振提醒"
         NavigationVibrationStatus.Arrived -> "已到达终点 · 三次短振"

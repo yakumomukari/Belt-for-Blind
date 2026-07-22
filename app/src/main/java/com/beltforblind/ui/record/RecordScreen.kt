@@ -3,6 +3,7 @@ package com.beltforblind.ui.record
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
@@ -103,6 +104,8 @@ import com.amap.api.maps2d.model.MarkerOptions
 import com.amap.api.maps2d.model.MyLocationStyle
 import com.amap.api.maps2d.model.PolylineOptions
 import com.beltforblind.route.location.AMapMapLocationSource
+import com.beltforblind.motor.MotorControlGateway
+import com.beltforblind.motor.MotorConnectionStatus
 import com.beltforblind.route.model.RoutePoint
 import com.beltforblind.route.model.RouteRecord
 import com.beltforblind.route.tangent.RouteTangent
@@ -123,11 +126,16 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @Composable
-fun RecordScreen(modifier: Modifier = Modifier) {
+fun RecordScreen(
+    motorController: MotorControlGateway,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val viewModel: RecordViewModel = viewModel(
         factory = RecordViewModel.factory(context.applicationContext),
     )
+    val motorState by motorController.state.collectAsState()
+    val beltGpsSample by motorController.gpsSample.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val pointCount by viewModel.pointCount.collectAsState()
     val recentPoints by viewModel.recentPoints.collectAsState()
@@ -148,10 +156,18 @@ fun RecordScreen(modifier: Modifier = Modifier) {
     var mapLocationTimestamp by remember { mutableStateOf<Long?>(null) }
     var showGpsDetails by remember { mutableStateOf(false) }
     var mapRecenterRequestId by remember { mutableLongStateOf(0L) }
+    val requiredBeltPermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
-        val granted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val granted = context.hasLocationPermission() ||
+            grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
         locationPermissionGranted = granted
         if (granted) {
             if (startRecordingAfterPermission) {
@@ -162,15 +178,30 @@ fun RecordScreen(modifier: Modifier = Modifier) {
         } else {
             viewModel.onPermissionDenied()
         }
+        if (
+            requiredBeltPermissions.all { permission ->
+                ContextCompat.checkSelfPermission(context, permission) ==
+                    PackageManager.PERMISSION_GRANTED
+            } &&
+            motorState.status !in setOf(
+                MotorConnectionStatus.Scanning,
+                MotorConnectionStatus.Connecting,
+                MotorConnectionStatus.Connected,
+            )
+        ) {
+            motorController.scanAndConnect()
+        }
         startRecordingAfterPermission = false
     }
     val requestLocationPermission: (Boolean) -> Unit = { startRecordingAfterGrant ->
         startRecordingAfterPermission = startRecordingAfterGrant
         permissionLauncher.launch(
-            arrayOf(
+            (
+                arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
-            ),
+                ) + requiredBeltPermissions
+            ).distinct().toTypedArray(),
         )
     }
     val startRecording = {
@@ -186,8 +217,19 @@ fun RecordScreen(modifier: Modifier = Modifier) {
     }
 
     LaunchedEffect(Unit) {
-        if (!locationPermissionGranted) {
+        val beltPermissionsGranted = requiredBeltPermissions.all { permission ->
+            ContextCompat.checkSelfPermission(context, permission) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        if (!locationPermissionGranted || !beltPermissionsGranted) {
             requestLocationPermission(false)
+        } else if (motorState.status !in setOf(
+                MotorConnectionStatus.Scanning,
+                MotorConnectionStatus.Connecting,
+                MotorConnectionStatus.Connected,
+            )
+        ) {
+            motorController.scanAndConnect()
         }
     }
 
@@ -303,6 +345,10 @@ fun RecordScreen(modifier: Modifier = Modifier) {
             }
 
             if (showGpsDetails) {
+                val activeBeltSample = beltGpsSample?.takeIf { sample ->
+                    sample.isFixValid &&
+                        System.currentTimeMillis() - sample.receivedAtMillis in 0..6_000L
+                }
                 GpsAccuracyDialog(
                     status = when {
                         !locationPermissionGranted -> "GPS 未授权"
@@ -313,8 +359,13 @@ fun RecordScreen(modifier: Modifier = Modifier) {
                         uiState is RecordingUiState.Recording -> "GPS 采集中"
                         else -> "GPS 待采集"
                     },
-                    accuracy = mapLocationAccuracy ?: latestReceivedAccuracy,
-                    updatedAt = mapLocationTimestamp,
+                    accuracy = activeBeltSample?.horizontalAccuracyMeters
+                        ?: mapLocationAccuracy
+                        ?: latestReceivedAccuracy,
+                    updatedAt = activeBeltSample?.receivedAtMillis ?: mapLocationTimestamp,
+                    source = if (activeBeltSample != null) "腰带 GPS" else "手机 GPS",
+                    satelliteCount = activeBeltSample?.satelliteCount,
+                    hdop = activeBeltSample?.hdop,
                     onDismiss = { showGpsDetails = false },
                 )
             }
@@ -409,6 +460,9 @@ private fun GpsAccuracyDialog(
     status: String,
     accuracy: Float?,
     updatedAt: Long?,
+    source: String,
+    satelliteCount: Int?,
+    hdop: Float?,
     onDismiss: () -> Unit,
 ) {
     val accuracyText = accuracy?.let {
@@ -433,9 +487,19 @@ private fun GpsAccuracyDialog(
         title = { Text("GPS 定位详情") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                DataRow(label = "定位来源", value = source, boldValue = true)
                 DataRow(label = "定位状态", value = status)
                 DataRow(label = "当前精度", value = accuracyText, boldValue = accuracy != null)
                 DataRow(label = "精度质量", value = qualityText)
+                satelliteCount?.let {
+                    DataRow(label = "卫星数", value = it.toString())
+                }
+                hdop?.let {
+                    DataRow(
+                        label = "HDOP",
+                        value = "%.2f".format(Locale.getDefault(), it),
+                    )
+                }
                 DataRow(
                     label = "记录合格标准",
                     value = "≤ %.0f m".format(

@@ -1,7 +1,7 @@
 package com.beltforblind.navigation.vibration
 
+import com.beltforblind.motor.MotorArcLayout
 import com.beltforblind.route.tangent.RouteTangent
-import kotlin.math.floor
 
 enum class NavigationVibrationStatus {
     Inactive,
@@ -16,8 +16,10 @@ enum class NavigationVibrationStatus {
 data class NavigationVibrationDecision(
     val status: NavigationVibrationStatus = NavigationVibrationStatus.Inactive,
     val motorNumber: Int? = null,
+    val motorIntensities: List<Int> = List(MotorArcLayout.MOTOR_COUNT) { 0 },
     val targetBearingDegrees: Double? = null,
     val relativeBearingDegrees: Double? = null,
+    val guidanceAngleDegrees: Double? = null,
     val distanceToRouteMeters: Double? = null,
     val remainingDistanceMeters: Double? = null,
 )
@@ -27,7 +29,7 @@ object NavigationVibrationPlanner {
         tangent: RouteTangent?,
         headingDegrees: Double?,
         locationAccuracyMeters: Float?,
-        previousMotorNumber: Int? = null,
+        previousGuidanceAngleDegrees: Double? = null,
     ): NavigationVibrationDecision {
         if (tangent == null) {
             return NavigationVibrationDecision(status = NavigationVibrationStatus.RouteUnavailable)
@@ -66,42 +68,62 @@ object NavigationVibrationPlanner {
         val relativeBearing = (
             tangent.tangentBearingDegrees.normalize360() - headingDegrees.normalize360()
         ).normalizeSigned()
+        val guidanceAngle = stableGuidanceAngle(
+            relativeBearingDegrees = relativeBearing,
+            previousGuidanceAngleDegrees = previousGuidanceAngleDegrees,
+        )
+        val intensities = MotorArcLayout.intensitiesForRelativeAngle(
+            relativeAngleDegrees = guidanceAngle,
+            maximumIntensity = GUIDANCE_MAXIMUM_INTENSITY,
+        )
         return baseDecision.copy(
             status = NavigationVibrationStatus.Guiding,
-            motorNumber = stableMotorForRelativeBearing(
-                relativeBearingDegrees = relativeBearing,
-                previousMotorNumber = previousMotorNumber,
-            ),
+            motorNumber = strongestMotor(intensities),
+            motorIntensities = intensities,
             relativeBearingDegrees = relativeBearing,
+            guidanceAngleDegrees = guidanceAngle,
         )
     }
 
-    fun motorForRelativeBearing(relativeBearingDegrees: Double): Int {
-        require(relativeBearingDegrees.isFinite()) { "Relative bearing must be finite." }
-        val clockwiseBearing = relativeBearingDegrees.normalize360()
-        return floor((clockwiseBearing + HALF_MOTOR_SECTOR_DEGREES) / MOTOR_SECTOR_DEGREES)
-            .toInt()
-            .mod(MOTOR_COUNT) + 1
-    }
-
-    fun stableMotorForRelativeBearing(
+    fun stableGuidanceAngle(
         relativeBearingDegrees: Double,
-        previousMotorNumber: Int?,
-    ): Int {
+        previousGuidanceAngleDegrees: Double?,
+    ): Double {
         require(relativeBearingDegrees.isFinite()) { "Relative bearing must be finite." }
-        if (previousMotorNumber == null || previousMotorNumber !in 1..MOTOR_COUNT) {
-            return motorForRelativeBearing(relativeBearingDegrees)
+        val normalized = relativeBearingDegrees.normalizeSigned()
+        val previous = previousGuidanceAngleDegrees
+            ?.takeIf { it.isFinite() }
+            ?.coerceIn(
+                MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES,
+                MotorArcLayout.MAX_RELATIVE_ANGLE_DEGREES,
+            )
+        if (
+            kotlin.math.abs(normalized) >= REAR_SIDE_HOLD_START_DEGREES &&
+            previous != null &&
+            kotlin.math.abs(previous) >= REAR_SIDE_HOLD_PREVIOUS_MIN_DEGREES
+        ) {
+            return if (previous < 0.0) {
+                MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES
+            } else {
+                MotorArcLayout.MAX_RELATIVE_ANGLE_DEGREES
+            }
         }
-
-        val previousSectorCenter = (previousMotorNumber - 1) * MOTOR_SECTOR_DEGREES
-        val distanceFromPreviousCenter = (
-            relativeBearingDegrees.normalize360() - previousSectorCenter
-        ).normalizeSigned()
-        if (kotlin.math.abs(distanceFromPreviousCenter) <= STABLE_SECTOR_HALF_WIDTH_DEGREES) {
-            return previousMotorNumber
+        val clamped = normalized.coerceIn(
+            MotorArcLayout.MIN_RELATIVE_ANGLE_DEGREES,
+            MotorArcLayout.MAX_RELATIVE_ANGLE_DEGREES,
+        )
+        if (previous != null && kotlin.math.abs(clamped - previous) < GUIDANCE_DEADBAND_DEGREES) {
+            return previous
         }
-        return motorForRelativeBearing(relativeBearingDegrees)
+        return clamped
     }
+
+    private fun strongestMotor(intensities: List<Int>): Int? =
+        intensities.withIndex()
+            .filter { it.value > 0 }
+            .maxByOrNull { it.value }
+            ?.index
+            ?.plus(1)
 
     private fun Double.normalize360(): Double {
         return ((this % FULL_CIRCLE_DEGREES) + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES
@@ -120,14 +142,12 @@ object NavigationVibrationPlanner {
     const val MIN_OFF_ROUTE_DISTANCE_METERS = 30.0
     const val ARRIVAL_DISTANCE_METERS = 10.0
     const val MIN_ARRIVAL_PROGRESS = 0.95
+    const val GUIDANCE_MAXIMUM_INTENSITY = 128
 
     private const val ACCURACY_DISTANCE_MULTIPLIER = 2.0
-    private const val MOTOR_COUNT = 8
-    private const val MOTOR_SECTOR_DEGREES = 45.0
-    private const val HALF_MOTOR_SECTOR_DEGREES = MOTOR_SECTOR_DEGREES / 2.0
-    private const val MOTOR_SECTOR_HYSTERESIS_DEGREES = 8.0
-    private const val STABLE_SECTOR_HALF_WIDTH_DEGREES =
-        HALF_MOTOR_SECTOR_DEGREES + MOTOR_SECTOR_HYSTERESIS_DEGREES
+    private const val GUIDANCE_DEADBAND_DEGREES = 3.0
+    private const val REAR_SIDE_HOLD_START_DEGREES = 170.0
+    private const val REAR_SIDE_HOLD_PREVIOUS_MIN_DEGREES = 70.0
     private const val HALF_CIRCLE_DEGREES = 180.0
     private const val FULL_CIRCLE_DEGREES = 360.0
 }

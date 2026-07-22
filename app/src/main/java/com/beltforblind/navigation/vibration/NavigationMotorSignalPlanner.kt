@@ -1,13 +1,19 @@
 package com.beltforblind.navigation.vibration
 
+import com.beltforblind.motor.MotorArcLayout
+
 data class MotorSignalFrame(
-    val motorNumber: Int?,
+    val motorIntensities: List<Int>,
     val durationMillis: Long,
 ) {
     init {
-        require(motorNumber == null || motorNumber in 1..8)
+        require(motorIntensities.size == MotorArcLayout.MOTOR_COUNT)
+        require(motorIntensities.all { it in 0..255 })
         require(durationMillis > 0L)
     }
+
+    val isStopped: Boolean
+        get() = motorIntensities.all { it == 0 }
 }
 
 data class NavigationMotorSignalPattern(
@@ -27,31 +33,32 @@ object NavigationMotorSignalPlanner {
         if (!enabled) return null
 
         return when (decision.status) {
-            NavigationVibrationStatus.Guiding -> decision.motorNumber?.let { motorNumber ->
+            NavigationVibrationStatus.Guiding -> decision.motorIntensities
+                .takeIf { intensities -> intensities.any { it > 0 } }
+                ?.let { intensities ->
                 NavigationMotorSignalPattern(
                     frames = listOf(
-                        MotorSignalFrame(motorNumber, GUIDANCE_ON_MILLIS),
-                        MotorSignalFrame(null, GUIDANCE_OFF_MILLIS),
+                        MotorSignalFrame(intensities, GUIDANCE_ON_MILLIS),
+                        stoppedFrame(GUIDANCE_OFF_MILLIS),
                     ),
                     repeats = true,
                 )
             }
             NavigationVibrationStatus.OffRoute -> NavigationMotorSignalPattern(
                 frames = listOf(
-                    MotorSignalFrame(LEFT_MOTOR_NUMBER, ALERT_ON_MILLIS),
-                    MotorSignalFrame(null, ALERT_GAP_MILLIS),
-                    MotorSignalFrame(RIGHT_MOTOR_NUMBER, ALERT_ON_MILLIS),
-                    MotorSignalFrame(null, OFF_ROUTE_REPEAT_GAP_MILLIS),
+                    singleMotorFrame(LEFT_MOTOR_NUMBER, ALERT_ON_MILLIS),
+                    stoppedFrame(ALERT_GAP_MILLIS),
+                    singleMotorFrame(RIGHT_MOTOR_NUMBER, ALERT_ON_MILLIS),
+                    stoppedFrame(OFF_ROUTE_REPEAT_GAP_MILLIS),
                 ),
                 repeats = true,
             )
             NavigationVibrationStatus.Arrived -> NavigationMotorSignalPattern(
                 frames = buildList {
                     repeat(ARRIVAL_PULSE_COUNT) { index ->
-                        add(MotorSignalFrame(FRONT_MOTOR_NUMBER, ARRIVAL_ON_MILLIS))
+                        add(MotorSignalFrame(FRONT_MOTOR_INTENSITIES, ARRIVAL_ON_MILLIS))
                         add(
-                            MotorSignalFrame(
-                                motorNumber = null,
+                            stoppedFrame(
                                 durationMillis = if (index == ARRIVAL_PULSE_COUNT - 1) {
                                     ARRIVAL_FINAL_OFF_MILLIS
                                 } else {
@@ -67,10 +74,29 @@ object NavigationMotorSignalPlanner {
         }
     }
 
-    const val FRONT_MOTOR_NUMBER = 1
-    const val RIGHT_MOTOR_NUMBER = 3
-    const val LEFT_MOTOR_NUMBER = 7
+    const val LEFT_MOTOR_NUMBER = 1
+    const val RIGHT_MOTOR_NUMBER = 8
 
+    private fun singleMotorFrame(motorNumber: Int, durationMillis: Long): MotorSignalFrame {
+        return MotorSignalFrame(
+            motorIntensities = List(MotorArcLayout.MOTOR_COUNT) { index ->
+                if (index == motorNumber - 1) ALERT_INTENSITY else 0
+            },
+            durationMillis = durationMillis,
+        )
+    }
+
+    private fun stoppedFrame(durationMillis: Long): MotorSignalFrame =
+        MotorSignalFrame(
+            motorIntensities = List(MotorArcLayout.MOTOR_COUNT) { 0 },
+            durationMillis = durationMillis,
+        )
+
+    private val FRONT_MOTOR_INTENSITIES = MotorArcLayout.intensitiesForRelativeAngle(
+        relativeAngleDegrees = 0.0,
+        maximumIntensity = NavigationVibrationPlanner.GUIDANCE_MAXIMUM_INTENSITY,
+    )
+    private const val ALERT_INTENSITY = 128
     private const val GUIDANCE_ON_MILLIS = 320L
     private const val GUIDANCE_OFF_MILLIS = 880L
     private const val ALERT_ON_MILLIS = 220L

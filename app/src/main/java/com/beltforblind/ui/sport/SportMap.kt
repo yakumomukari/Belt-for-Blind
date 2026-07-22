@@ -28,6 +28,7 @@ internal fun SportMap(
     route: RouteRecord?,
     routeTangent: RouteTangent?,
     currentLocation: RoutePoint?,
+    locationSourceKind: LocationSourceKind,
     locationPermissionGranted: Boolean,
     followUser: Boolean,
     recenterRequestId: Long,
@@ -85,7 +86,15 @@ internal fun SportMap(
                 focusOnRouteStart = currentLocation == null,
             )
             controller.updateCompletedRoute(route, routeTangent)
-            controller.updateFollowMode(followUser)
+            controller.updateFollowMode(
+                followUser = followUser,
+                usesBeltGps = locationSourceKind == LocationSourceKind.Belt,
+            )
+            controller.updateBeltLocation(
+                location = currentLocation,
+                visible = locationSourceKind == LocationSourceKind.Belt,
+                followUser = followUser,
+            )
             controller.centerOnInitialLocation(currentLocation)
             controller.handleRecenter(recenterRequestId, currentLocation)
         },
@@ -101,6 +110,7 @@ private class SportMapController(
     private var completedPolyline: Polyline? = null
     private var startMarker: Marker? = null
     private var endMarker: Marker? = null
+    private var beltLocationMarker: Marker? = null
     private var followMode: Boolean? = null
     private var initialLocationCentered = false
     private var handledRecenterRequestId = 0L
@@ -195,13 +205,14 @@ private class SportMapController(
         )
     }
 
-    fun updateFollowMode(followUser: Boolean) {
-        if (followMode == followUser) return
-        followMode = followUser
+    fun updateFollowMode(followUser: Boolean, usesBeltGps: Boolean) {
+        val newMode = followUser && !usesBeltGps
+        if (followMode == newMode) return
+        followMode = newMode
         mapView.map.setMyLocationStyle(
             MyLocationStyle()
                 .myLocationType(
-                    if (followUser) {
+                    if (newMode) {
                         MyLocationStyle.LOCATION_TYPE_FOLLOW
                     } else {
                         MyLocationStyle.LOCATION_TYPE_SHOW
@@ -212,6 +223,31 @@ private class SportMapController(
                 .radiusFillColor(LOCATION_RADIUS_COLOR)
                 .strokeWidth(2f),
         )
+    }
+
+    fun updateBeltLocation(
+        location: RoutePoint?,
+        visible: Boolean,
+        followUser: Boolean,
+    ) {
+        if (!visible || location == null) {
+            beltLocationMarker?.remove()
+            beltLocationMarker = null
+            return
+        }
+        val position = LatLng(location.latitude, location.longitude)
+        val marker = beltLocationMarker ?: mapView.map.addMarker(
+            MarkerOptions()
+                .position(position)
+                .title("Belt GPS")
+                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_VIOLET)),
+        ).also { beltLocationMarker = it }
+        marker.position = position
+        if (followUser) {
+            mapView.map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(position, FIXED_MAP_ZOOM),
+            )
+        }
     }
 
     fun centerOnInitialLocation(location: RoutePoint?) {

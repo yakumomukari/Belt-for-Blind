@@ -46,6 +46,11 @@ enum class BeltConnectionState(val label: String) {
     Error("腰带连接异常"),
 }
 
+enum class LocationSourceKind {
+    Phone,
+    Belt,
+}
+
 data class SportUiState(
     val stage: SportStage = SportStage.Preparing,
     val gpsState: GpsState = GpsState(),
@@ -54,6 +59,7 @@ data class SportUiState(
     val routesLoading: Boolean = false,
     val routeLoadError: String? = null,
     val currentLocation: RoutePoint? = null,
+    val locationSource: LocationSourceKind = LocationSourceKind.Phone,
     val routeProgress: Float = 0f,
     val routeTangent: RouteTangent? = null,
     val headingDegrees: Double? = null,
@@ -74,7 +80,7 @@ data class SportUiState(
 ) {
     val canStart: Boolean
         get() = selectedRoute?.points?.size?.let { it >= MIN_ROUTE_POINT_COUNT } == true &&
-            locationPermissionGranted &&
+            (locationPermissionGranted || locationSource == LocationSourceKind.Belt) &&
             currentLocation != null
 }
 
@@ -98,6 +104,7 @@ sealed interface SportUiEvent {
     data object MapMovedByUser : SportUiEvent
     data class LocationPermissionChanged(val granted: Boolean) : SportUiEvent
     data class LocationUpdated(val point: RoutePoint) : SportUiEvent
+    data class BeltLocationUpdated(val point: RoutePoint) : SportUiEvent
     data class LocationFailed(val code: Int, val message: String) : SportUiEvent
     data class HeadingUpdated(val headingDegrees: Double) : SportUiEvent
     data object HeadingUnavailable : SportUiEvent

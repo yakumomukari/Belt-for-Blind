@@ -8,39 +8,55 @@ import org.junit.Test
 
 class NavigationMotorSignalPlannerTest {
     @Test
-    fun guidingUsesRepeatingDirectionalPulse() {
+    fun guidingUsesRepeatingIntensityVectorPulse() {
+        val intensities = listOf(0, 0, 0, 80, 48, 0, 0, 0)
         val pattern = NavigationMotorSignalPlanner.patternFor(
             decision = NavigationVibrationDecision(
                 status = NavigationVibrationStatus.Guiding,
                 motorNumber = 4,
+                motorIntensities = intensities,
             ),
             enabled = true,
         )!!
 
         assertTrue(pattern.repeats)
-        assertEquals(listOf(4, null), pattern.frames.map { it.motorNumber })
+        assertEquals(intensities, pattern.frames[0].motorIntensities)
+        assertTrue(pattern.frames[1].isStopped)
     }
 
     @Test
-    fun offRouteAlternatesLeftAndRightWarningMotors() {
+    fun offRouteAlternatesLeftAndRightEndMotors() {
         val pattern = NavigationMotorSignalPlanner.patternFor(
             decision = NavigationVibrationDecision(status = NavigationVibrationStatus.OffRoute),
             enabled = true,
         )!!
 
         assertTrue(pattern.repeats)
-        assertEquals(listOf(7, null, 3, null), pattern.frames.map { it.motorNumber })
+        assertEquals(
+            listOf(listOf(1), emptyList(), listOf(8), emptyList()),
+            pattern.frames.map(::activeMotors),
+        )
     }
 
     @Test
-    fun arrivalPlaysThreeFrontPulsesOnce() {
+    fun arrivalPlaysThreeCentralPairPulsesOnce() {
         val pattern = NavigationMotorSignalPlanner.patternFor(
             decision = NavigationVibrationDecision(status = NavigationVibrationStatus.Arrived),
             enabled = true,
         )!!
 
         assertFalse(pattern.repeats)
-        assertEquals(listOf(1, null, 1, null, 1, null), pattern.frames.map { it.motorNumber })
+        assertEquals(
+            listOf(
+                listOf(4, 5),
+                emptyList(),
+                listOf(4, 5),
+                emptyList(),
+                listOf(4, 5),
+                emptyList(),
+            ),
+            pattern.frames.map(::activeMotors),
+        )
     }
 
     @Test
@@ -57,10 +73,16 @@ class NavigationMotorSignalPlannerTest {
             NavigationMotorSignalPlanner.patternFor(
                 decision = NavigationVibrationDecision(
                     status = NavigationVibrationStatus.Guiding,
-                    motorNumber = 1,
+                    motorNumber = 4,
+                    motorIntensities = listOf(0, 0, 0, 64, 64, 0, 0, 0),
                 ),
                 enabled = false,
             ),
         )
     }
+
+    private fun activeMotors(frame: MotorSignalFrame): List<Int> =
+        frame.motorIntensities.mapIndexedNotNull { index, intensity ->
+            (index + 1).takeIf { intensity > 0 }
+        }
 }
